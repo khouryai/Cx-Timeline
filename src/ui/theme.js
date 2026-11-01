@@ -3,8 +3,9 @@
  *
  * The theme is a device preference, not project data: the same plan opened on
  * a projector should be able to use the Presentation palette without changing
- * the document. It is mirrored into the document's settings so exports can
- * reproduce the look, but the local preference always wins on load.
+ * the document. It is mirrored into the document's settings, quietly — never an
+ * undoable edit (`core/store.js`) — so a computer with no preference of its own
+ * opens the plan the way it was last seen; the local preference always wins.
  *
  * Imports: events, storage, store, renderer.
  */
@@ -71,14 +72,3 @@ export function applyTheme(id, { persist = true, syncDoc = true } = {}) {
   paint();
 }
 
-/** Step to the next theme in the list — bound to a toolbar button. */
-export function cycleTheme() {
-  const i = THEMES.findIndex((t) => t.id === current);
-  applyTheme(THEMES[(i + 1) % THEMES.length].id);
-}
-
-/** True for themes whose surfaces are light — used by exporters. */
-export function isLightTheme(id = current) {
-  const drawn = palette(id);
-  return drawn === 'light' || drawn === 'presentation';
-}

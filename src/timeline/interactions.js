@@ -1043,11 +1043,3 @@ export function stretchSelection(direction) {
   renderer.requestRender();
 }
 
-/** True while a gesture is in flight — the renderer avoids heavy work then. */
-export function isDragging() {
-  return gesture !== null;
-}
-
-export function currentGesture() {
-  return gesture;
-}

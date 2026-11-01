@@ -241,8 +241,6 @@ export const TYPES = {
   },
 };
 
-export const TYPE_IDS = Object.keys(TYPES);
-
 /** Types grouped for menus, preserving registry order. */
 export function typeGroups() {
   const groups = new Map();
@@ -437,16 +435,6 @@ export function listOption(listId, id) {
   return listOptions(listId).find((o) => o.id === id) || null;
 }
 
-/**
- * A value's descriptor, with a readable fallback for anything the list does
- * not know about — an imported file may carry statuses this project has never
- * seen, and showing the raw value beats showing nothing.
- */
-export function listLabel(listId, id, fallback = '') {
-  if (!id) return fallback;
-  return listOption(listId, id)?.label || String(id);
-}
-
 /** Status descriptor with a safe fallback for unknown values. */
 export function statusOf(id) {
   const option = listOption('status', id);
@@ -456,10 +444,6 @@ export function statusOf(id) {
 
 export function subsystemOf(id) {
   return listOption('subsystem', id);
-}
-
-export function severityOf(id) {
-  return listOption('severity', id);
 }
 
 /** Where a list's values live on an object — used for counting and reassigning. */
@@ -535,9 +519,6 @@ export function linkTypeBetween(fromSide, toSide) {
    it cannot go stale, and an import only has to carry four columns.
    ═══════════════════════════════════════════════════════════════════════ */
 
-/** The two kinds of import. A progress import never touches the baseline. */
-export const P6_KINDS = ['baseline', 'progress'];
-
 export function emptyRegister() {
   return {
     activities: {},   // activityId → entry
@@ -579,10 +560,6 @@ export function p6Register(doc) {
 export function p6Activity(doc, activityId) {
   if (!activityId) return null;
   return p6Register(doc).activities[String(activityId)] || null;
-}
-
-export function p6Count(doc) {
-  return Object.keys(p6Register(doc).activities).length;
 }
 
 /**
@@ -1651,23 +1628,6 @@ export function projectExtent(doc) {
   }
   const pad = Math.max(MS_DAY * 7, (max - min) * 0.04);
   return { start: min - pad, end: max + pad };
-}
-
-/** Every distinct owner in the document, sorted. */
-export function ownersOf(doc) {
-  return Array.from(new Set(doc.objects.map((o) => o.owner).filter(Boolean))).sort();
-}
-
-/** Every distinct area in the document, sorted. */
-export function areasOf(doc) {
-  return Array.from(new Set(doc.objects.map((o) => o.area).filter(Boolean))).sort();
-}
-
-/** Every distinct tag in the document, sorted. */
-export function tagsOf(doc) {
-  const set = new Set();
-  for (const o of doc.objects) for (const t of o.tags || []) set.add(t);
-  return Array.from(set).sort();
 }
 
 /** ISO date export helper used by CSV/PDF writers. */

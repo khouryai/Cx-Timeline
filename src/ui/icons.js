@@ -175,20 +175,8 @@ export function icon(name, opts = {}) {
   );
 }
 
-/** Render an icon straight to a detached SVG element. */
-export function iconEl(name, opts = {}) {
-  const wrapper = document.createElement('span');
-  wrapper.innerHTML = icon(name, opts);
-  return wrapper.firstElementChild;
-}
-
 export function hasIcon(name) {
   return Object.prototype.hasOwnProperty.call(ICONS, name);
-}
-
-/** Raw path markup — used by the SVG and PDF exporters. */
-export function iconPath(name) {
-  return ICONS[name] ? ICONS[name][0] : '';
 }
 
 /**
@@ -205,13 +193,3 @@ export function searchIcons(query) {
   });
 }
 
-/** Icons grouped by category, for the browse view of the picker. */
-export function iconCategories() {
-  const groups = new Map();
-  for (const name of ICON_NAMES) {
-    const category = ICONS[name][2] || 'Other';
-    if (!groups.has(category)) groups.set(category, []);
-    groups.get(category).push(name);
-  }
-  return Array.from(groups, ([name, icons]) => ({ name, icons }));
-}

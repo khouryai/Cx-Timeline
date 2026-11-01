@@ -65,20 +65,13 @@ export function emit(event, payload) {
   }
 }
 
-/** Remove every subscription — used by tests and teardown. */
-export function clearAll() {
-  listeners.clear();
-}
-
 /**
  * The canonical event names. Using these constants (rather than bare strings)
  * keeps typos out and gives one place to see the whole application protocol.
  */
 export const EV = {
   /* Document lifecycle */
-  DOC_LOADED: 'doc:loaded',
   DOC_CHANGED: 'doc:changed', // { reason, ids? } — any mutation to the project
-  DOC_META_CHANGED: 'doc:meta', // name/description/settings only
   DOC_REPLACED: 'doc:replaced', // wholesale swap (import, restore, new)
   LISTS_CHANGED: 'lists:changed', // { listId } — a dropdown vocabulary was edited
   P6_IMPORTED: 'p6:imported', // { kind, plan } — a Primavera export was applied
@@ -100,16 +93,11 @@ export const EV = {
   /* History */
   HISTORY_CHANGED: 'history:changed', // { canUndo, canRedo, depth }
 
-  /* Account & sharing (hosted deployments only) */
-  AUTH_CHANGED: 'auth:changed', // { user } — signed in, signed out, session restored
-  ACCESS_CHANGED: 'access:changed', // { role, readOnly } — which project, and what you may do
+  /* Editing without the pen */
   EDIT_REFUSED: 'access:refused', // a write was attempted without permission
-  CLOUD_CONFLICT: 'cloud:conflict', // someone else saved the project first
 
-  /* The resource calendar — a separate module, with a separate backend and a
-     separate account. Deliberately not AUTH_CHANGED: signing in to the
-     calendar must not disturb the timeline, which needs no account at all. */
-  RC_AUTH_CHANGED: 'rc:auth', // { user, event }
+  /* The resource calendar — a separate module, behind its own pen. */
+  RC_AUTH_CHANGED: 'rc:auth', // { user, event } — the calendar was opened, created, or its folder changed
   RC_CHANGED: 'rc:changed', // { what } — a row was written; panes reload
   RC_PEN: 'rc:pen', // { role, holder } — who may write the calendar changed
   RC_SHOW_TAB: 'rc:tab', // { tab } — a tab asking for another; ui/rc.js owns the router
@@ -128,7 +116,6 @@ export const EV = {
   SCALE_CHANGED: 'view:scale',
 
   /* Rendering */
-  RENDER_REQUESTED: 'render:request',
   RENDER_DONE: 'render:done',
 
   /* UI */
@@ -141,6 +128,5 @@ export const EV = {
   PANE_REFRESH: 'panel:refresh',
   PANE_OPEN: 'panel:open', // { pane } — a pane asking for another one; the dock owns showPane()
   TOAST: 'ui:toast',
-  STATUS: 'ui:status',
   PRESENT_MODE: 'ui:present',
 };

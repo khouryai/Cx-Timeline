@@ -10,14 +10,11 @@
  * Leaf module: imports nothing.
  */
 
-export const MS_MINUTE = 60_000;
-export const MS_HOUR = 3_600_000;
 export const MS_DAY = 86_400_000;
 export const MS_WEEK = MS_DAY * 7;
 
 export const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 export const MONTHS_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-export const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 export const DAYS_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 export const DAYS_MIN = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
 
@@ -46,13 +43,6 @@ export function toISO(ms) {
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
 }
 
-/** Milliseconds → `YYYY-MM-DDTHH:MM` (UTC) for datetime inputs. */
-export function toISOMinutes(ms) {
-  if (!Number.isFinite(ms)) return '';
-  const d = new Date(ms);
-  return `${toISO(ms)}T${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
-}
-
 function pad(n) {
   return String(n).padStart(2, '0');
 }
@@ -78,10 +68,6 @@ export function startOfDay(ms) {
   return Math.floor(ms / MS_DAY) * MS_DAY;
 }
 
-export function endOfDay(ms) {
-  return startOfDay(ms) + MS_DAY - 1;
-}
-
 /** Start of week. `weekStart` is 0 (Sunday) or 1 (Monday, the default). */
 export function startOfWeek(ms, weekStart = 1) {
   const d = startOfDay(ms);
@@ -93,11 +79,6 @@ export function startOfWeek(ms, weekStart = 1) {
 export function startOfMonth(ms) {
   const d = new Date(ms);
   return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
-}
-
-export function endOfMonth(ms) {
-  const d = new Date(ms);
-  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1) - MS_DAY;
 }
 
 export function startOfQuarter(ms) {
@@ -347,20 +328,6 @@ export function setWorkWeek(days) {
   workWeek = days === 5 ? 5 : 7;
 }
 
-export function getWorkWeek() {
-  return workWeek;
-}
-
-/** Relative phrasing against a reference date: "in 4 days", "2 weeks ago". */
-export function fmtRelative(ms, ref = todayMs()) {
-  const d = daysBetween(ref, ms);
-  if (d === 0) return 'today';
-  if (d === 1) return 'tomorrow';
-  if (d === -1) return 'yesterday';
-  const abs = fmtDuration(Math.abs(d));
-  return d > 0 ? `in ${abs}` : `${abs} ago`;
-}
-
 /** Timestamp for version history and backups — local time, by design. */
 export function fmtTimestamp(ms) {
   const d = new Date(ms);
@@ -384,12 +351,6 @@ export const SCALES = [
   { id: 'quarter', label: 'Quarter', minPxPerDay: 0.55, step: MS_DAY * 91.3 },
   { id: 'year', label: 'Year', minPxPerDay: 0, step: MS_DAY * 365.25 },
 ];
-
-/** The scale one rung coarser than `id` — used for the ruler's upper band. */
-export function coarserScale(id) {
-  const i = SCALES.findIndex((s) => s.id === id);
-  return SCALES[Math.min(SCALES.length - 1, i + 1)];
-}
 
 /**
  * Generate ruler ticks for a scale across [fromMs, toMs].

@@ -112,14 +112,13 @@ export function panePalette(root) {
   root.appendChild(el('div', { class: 'cx-hint', style: { marginBottom: '10px' }, text: 'Pick a tool, then click on the timeline to place it. Double-clicking empty canvas always creates an activity.' }));
 
   for (const group of typeGroups()) {
-    const grid = el('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '5px' } });
+    const grid = el('div', { class: 'palette-grid' });
     for (const type of group.items) {
       grid.appendChild(
         el('button', {
           class: 'cx-btn mini' + (store.getTool() === type.id ? ' active' : ''),
-          style: { justifyContent: 'flex-start' },
           title: `${type.label} — click the timeline to place`,
-          html: icon(type.icon, { size: 13 }) + `<span style="overflow:hidden;text-overflow:ellipsis">${type.label}</span>`,
+          html: icon(type.icon, { size: 13 }) + `<span>${type.label}</span>`,
           onClick: () => {
             store.setTool(type.id);
             refreshPane();

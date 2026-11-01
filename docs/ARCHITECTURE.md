@@ -1252,13 +1252,15 @@ narrative and is maintained by whoever runs the project; the calendar's members
 are the field team. They were read-only in practice, because the plan lives in
 a folder and somebody else usually held the pen — which is not the same thing,
 because the pen is a *turn*: "Take over editing" was on screen and a member who
-pressed it got the plan. `core/access.js` is a leaf holding one boolean and a
-reason, `main.js` states it from the calendar's role (the one module that may
-see both, because the plan's storage path must never import `core/rc.js`), and
-`core/store.js` refuses every edit while `core/filestore.js` refuses to hand
-the pen over. The interface then stops offering it, in that order of
-importance. Absent is editable: local mode, a build with no calendar and every
-test suite never call `lockPlan()` at all.
+pressed it got the plan. `core/access.js` held one boolean and a reason, which
+`main.js` stated from the calendar's role, and `core/store.js` and
+`core/filestore.js` refused edits and the pen while it was set.
+
+*Retired with the accounts.* No build has had a calendar role since the
+calendar moved into the folder, so nothing set the lock and every branch that
+read it was unreachable; the lock and those branches are gone. Who may edit the
+plan is the pen, and beneath it the folder's sharing — a read-only OneDrive
+share cannot write. `core/access.js` keeps only the reader's own view, below.
 
 ### A reader's view is their own
 
@@ -1273,7 +1275,8 @@ exporter read them from there and a second answer would be a second place to
 look; what changed is who owns the value. `VIEW_PREFERENCES` in `core/store.js`
 routes them through `editQuiet` — ungated, out of history, never marking the
 plan unsaved — and `persistView()` / `restoreAccountView()` remember them per
-account and per plan in `core/access.js`. That is localStorage, so it is per
+plan in `core/access.js` (under the key `cxtl.view.anon.*`, where they were
+kept when there was no account, so none moved when the accounts went). That is localStorage, so it is per
 browser profile too: the honest limitation, given there is no server to keep it
 on and the plan is the one place it must not go.
 
@@ -1928,6 +1931,9 @@ site: it now lands in the phone app, but in the browser. Remove it and add the
 app again from `m/`.
 
 ### The phone's service worker keeps the app, never the data
+
+*Retired with the phone app (`docs/PLAN_ONEDRIVE_ONLY.md`); its stylesheet,
+`css/mobile.css`, went last.*
 
 **The phone's service worker keeps the app, never the data.** `m/sw.js`
 precaches the page, the bundle, the stylesheets and `config.js`, asks the
@@ -2990,9 +2996,8 @@ own, nor from a `file://` page.
 
 `ui/theme.js` has a sixth choice that is not a sixth palette: System draws Dark
 or Light, whichever `prefers-color-scheme` says, and repaints when the computer
-changes. `getTheme()` answers `system`; the palette drawn is `palette(current)`,
-and `isLightTheme()` asks the palette. Dark stays the default. The phone app has
-followed the phone since it existed.
+changes. `getTheme()` answers `system`; the palette drawn is `palette(current)`.
+Dark stays the default.
 
 ### Motion follows the system's preference, in script as in CSS
 

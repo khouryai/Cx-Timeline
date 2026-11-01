@@ -11,7 +11,8 @@
  * which updates the document without touching history; the interaction
  * commits once with a single `edit()` when the pointer is released.
  *
- * On a hosted deployment a project can be open read-only. Because every write
+ * A plan in the shared folder is read-only while a colleague holds its pen.
+ * Because every write
  * funnels through the three entry points below, one guard covers the whole
  * application — there is no path to a mutation that does not pass through
  * here. The write guard in `core/filestore.js` is what keeps a colleague's
@@ -29,11 +30,11 @@ import { emit, EV } from './events.js';
    through, autosave was refused by the folder, and the work was marked saved
    without ever having been written anywhere. */
 import { isViewer as folderViewer } from './filestore.js';
-import { planLocked, readView, writeView } from './access.js';
+import { readView, writeView } from './access.js';
 import {
   normalise, makeProject, makeObject, makeLane, makeLink, effectiveToday, TYPES, syncLists,
-  defaultLists, LIST_DEFS, listUsage, emptyRegister, makeP6Activity, p6Register, p6Activity,
-  p6Dates, p6PlacedIds, p6LinkedIds, p6RollUp, makeP6Baseline, baselineSnapshot,
+  defaultLists, LIST_DEFS, listUsage, emptyRegister, makeP6Activity, p6Activity,
+  p6Dates, p6LinkedIds, p6RollUp, makeP6Baseline, baselineSnapshot,
   syncDurationBasis, emptyLookahead, lookaheadRegister, lookaheadActivity, makeLookaheadEntry,
   laLinkedIds, laPlacedIds, laRollUp,
 } from './model.js';
@@ -100,15 +101,9 @@ function refuseWrite(label) {
   return true;
 }
 
-/**
- * True when the open plan is read-only in this session.
- *
- * Two different facts, and either is enough: a colleague may hold the pen on
- * the folder, or this session may not edit the plan at all, which is what
- * `planLocked()` says — unlike the pen, that is not a turn somebody can take.
- */
+/** True when the open plan is read-only in this session: a colleague holds the pen on the folder. */
 export function isDocReadOnly() {
-  return folderViewer() || planLocked();
+  return folderViewer();
 }
 
 /* ── Indexing ──────────────────────────────────────────────────────────── */
@@ -152,13 +147,6 @@ export function orderedLanes(includeHidden = true) {
     if (lane && (includeHidden || !lane.hidden)) out.push(lane);
   }
   return out;
-}
-
-/** Objects belonging to a lane, sorted by z then start. */
-export function objectsInLane(laneId) {
-  return doc.objects
-    .filter((o) => o.lane === laneId)
-    .sort((a, b) => a.z - b.z || a.start - b.start);
 }
 
 export function today() {
@@ -291,11 +279,6 @@ export function cancelPreview() {
   emit(EV.DOC_CHANGED, { reason: 'preview-cancel', transient: true });
 }
 
-/** True while a gesture is staging changes outside history. */
-export function hasPreview() {
-  return previewBase !== null;
-}
-
 /**
  * Change settings or view state that should persist but never appear in the
  * undo stack (zoom level, panel widths, the active dock tab).
@@ -395,10 +378,6 @@ export function setSelection(ids) {
   emit(EV.SELECTION_CHANGED, { ids: getSelection() });
 }
 
-export function addToSelection(ids) {
-  setSelection([...getSelection(), ...[].concat(ids)]);
-}
-
 export function toggleSelection(id) {
   const next = new Set(ui.selection);
   if (next.has(id)) next.delete(id);
@@ -436,10 +415,6 @@ export function setTool(tool) {
   if (ui.tool === tool) return;
   ui.tool = tool;
   emit(EV.TOOL_CHANGED, { tool });
-}
-
-export function getHover() {
-  return ui.hoverId;
 }
 
 export function setHover(id) {
@@ -745,11 +720,16 @@ export function createsCycle(from, to) {
 /* ── Settings ──────────────────────────────────────────────────────────── */
 
 /**
- * Settings that describe how input behaves rather than how the plan reads.
- * These are preferences, so they persist but stay out of the undo stack —
- * pressing Ctrl+Z should never silently change your snapping back.
+ * Settings that describe how input behaves rather than how the plan reads —
+ * and the theme, which is this computer's (`ui/theme.js`) and is mirrored here
+ * only for a computer that has none. These are preferences, so they persist
+ * but stay out of the undo stack — pressing Ctrl+Z should never silently
+ * change your snapping back. The theme was an undoable edit, so it filled the
+ * history with "Change theme", Ctrl+Z put the stored value back while the
+ * screen stayed as it was, and switching it without the pen was refused with a
+ * read-only notice.
  */
-const INPUT_PREFERENCES = new Set(['snap', 'wheelMode', 'weekStart', 'dateOrder']);
+const INPUT_PREFERENCES = new Set(['snap', 'wheelMode', 'weekStart', 'dateOrder', 'theme']);
 
 /**
  * Settings that say how somebody is *looking* at the plan, not what it says.
@@ -765,7 +745,7 @@ const INPUT_PREFERENCES = new Set(['snap', 'wheelMode', 'weekStart', 'dateOrder'
  * They still live on `doc.settings`, because the renderer, the layout packer and
  * every exporter read them from there and a second answer would be a second
  * place to look. What changed is who owns the value: it is set quietly, never
- * enters history, never marks the plan unsaved, and is remembered per account in
+ * enters history, never marks the plan unsaved, and is remembered per plan in
  * `core/access.js` instead of being saved with the document.
  */
 const VIEW_PREFERENCES = new Set(['filterMode', 'activeBaseline', 'showBaseline']);
@@ -790,13 +770,13 @@ export function setSetting(key, value, label = 'Change setting') {
   });
 }
 
-/* ── The view that belongs to one account ──────────────────────────────── */
+/* ── The view that belongs to the reader ───────────────────────────────── */
 
 /** True while `restoreAccountView()` is applying, so it does not write back its own read. */
 let restoring = false;
 
 /**
- * Remember how this account is looking at this plan.
+ * Remember how this reader is looking at this plan.
  *
  * Keyed on the document's id, so opening a different plan is a different view
  * rather than the last one's filter applied to somebody else's bars. Called from
@@ -1067,16 +1047,8 @@ export function resetList(listId) {
    The P6 register
    ═══════════════════════════════════════════════════════════════════════ */
 
-export function getP6() {
-  return p6Register(doc);
-}
-
 export function getP6Activity(id) {
   return p6Activity(doc, id);
-}
-
-export function placedP6Ids() {
-  return p6PlacedIds(doc);
 }
 
 /**
@@ -1141,13 +1113,6 @@ export function importP6(kind, incoming, meta = {}) {
     register.history = [{ kind, ...stamp }, ...(register.history || [])].slice(0, 12);
     d.p6 = register;
     ensureP6Baselines(d);
-  });
-}
-
-/** Forget every imported activity. Objects keep their links, harmlessly. */
-export function clearP6() {
-  return edit('Clear the P6 register', (d) => {
-    d.p6 = emptyRegister();
   });
 }
 
@@ -1333,16 +1298,6 @@ export function expandGroupSelection(ids) {
 }
 
 /* ── Testing seam ──────────────────────────────────────────────────────── */
-
-/** Reset the store to a known state. Used by the headless test harness. */
-export function __resetForTests(nextDoc) {
-  doc = normalise(nextDoc || makeProject());
-  history = new History();
-  ui.selection.clear();
-  previewBase = null;
-  dirty = false;
-  reindex();
-}
 
 /* ══════════════════════════════════════════════════════════════════════════
    The look-ahead register

@@ -523,13 +523,6 @@ export function selectInput({ value, options, onChange, mini = false, placeholde
   return select;
 }
 
-/** @param {{ value?: string, onChange?: Function }} options */
-export function colorInput({ value = '#5b93f5', onChange }) {
-  const input = el('input', { class: 'cx-color', type: 'color', value: value || '#5b93f5' });
-  if (onChange) input.addEventListener('input', () => onChange(input.value));
-  return input;
-}
-
 /** @param {{ label: any, checked?: boolean, onChange?: Function }} options */
 export function checkbox({ label, checked = false, onChange }) {
   const input = el('input', { type: 'checkbox' });
@@ -839,13 +832,6 @@ export function skeleton(rows = 3) {
 export function progressBar(percent, color) {
   return el('div', { class: 'cx-progress' }, [
     el('span', { style: { width: `${clamp(percent, 0, 100)}%`, background: color || 'var(--good)' } }),
-  ]);
-}
-
-/** Render a tag chip. */
-export function tagChip(label, color) {
-  return el('span', { class: 'cx-tag', style: color ? { color, background: 'transparent', boxShadow: `inset 0 0 0 1px ${color}55` } : {} }, [
-    el('span', { text: label }),
   ]);
 }
 

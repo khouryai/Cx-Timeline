@@ -190,7 +190,9 @@ function buildSidenav() {
     el('div', { class: 'sidenav-footer' }, [
       el('div', { class: 'sidenav-project-tag', dataset: { projectTag: '1' }, text: doc.project || doc.client || fallbackTag() }),
       el('button', {
-        class: 'cx-btn mini',
+        class: 'cx-btn mini sidenav-present',
+        title: 'Presentation mode',
+        'aria-label': 'Present',
         html: icon('maximize', { size: 12 }) + '<span>Present</span>',
         onClick: () => emit(EV.PRESENT_MODE, { on: !document.body.classList.contains('presenting') }),
       }),
@@ -210,6 +212,10 @@ function workspaceSwitch() {
   const button = (id, label, iconName) => el('button', {
     class: 'ws-btn',
     type: 'button',
+    dataset: { workspace: id },
+    // The narrow sidebar shows the icon alone; the name stays on the button.
+    title: label,
+    'aria-label': label,
     'aria-pressed': String(workspace.current() === id),
     html: icon(iconName, { size: 13 }) + `<span>${label}</span>`,
     onClick: () => workspace.show(id),
@@ -737,16 +743,14 @@ function wireEvents() {
   on(EV.DOC_REPLACED, refresh);
   on(EV.HISTORY_CHANGED, refresh);
 
-  on(EV.ACCESS_CHANGED, refresh);
-  // The switch is two buttons; repainting the sidebar to move a highlight
-  // would throw away the pane list and its scroll position for nothing.
   on(EV.CALENDAR_FAILED, ({ message }) => {
     toast({ tone: 'bad', title: 'The calendar did not open', message, timeout: 10000 });
   });
+  // The switch is two buttons; repainting the sidebar to move a highlight
+  // would throw away the pane list and its scroll position for nothing.
   on(EV.WORKSPACE_CHANGED, ({ workspace: which }) => {
     for (const btn of dom.sidenav.querySelectorAll('.ws-btn')) {
-      const label = btn.querySelector('span')?.textContent.toLowerCase();
-      btn.setAttribute('aria-pressed', String(label === which));
+      btn.setAttribute('aria-pressed', String(btn.dataset.workspace === which));
     }
   });
   on(EV.FILE_STATE, () => refreshStatus());
@@ -781,9 +785,3 @@ function wireEvents() {
   });
 }
 
-/** Public refresh hook for modules that change shell-visible state. */
-export function refreshShell() {
-  refreshToolbar();
-  refreshStatus();
-  updateNav();
-}

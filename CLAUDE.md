@@ -87,10 +87,9 @@ else with a clear error:
 core/util · core/events · core/dates      leaves — import nothing
 core/folder_rules                         a leaf: the shared folder's names,
                                           digest and pen rules, pure (Node-tested)
-core/access                               a leaf: may this window edit the plan,
-                                          and the view that is theirs alone.
-                                          Written by main.js, read by store and
-                                          filestore — which must never see core/rc
+core/access                               a leaf: the view that is the reader's
+                                          alone (filters, baseline), per plan.
+                                          Read by store, which must never see core/rc
 core/desktop                              the only module that knows Tauri
 core/filestore → core/desktop · core/folder_rules
                                           the only module that knows the File

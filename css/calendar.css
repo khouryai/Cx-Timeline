@@ -59,9 +59,7 @@
 
 /* Which stage is on screen. The timeline is hidden rather than unmounted, so
    the viewport, the selection and the render caches survive a switch. */
-body[data-workspace='calendar'] #canvas-frame,
-body[data-workspace='calendar'] #minimap,
-body[data-workspace='calendar'] #legend { display: none; }
+body[data-workspace='calendar'] #canvas-frame { display: none; }
 
 body[data-workspace='calendar'] #rc-frame { display: flex; }
 

@@ -16,9 +16,20 @@ import fs from 'node:fs';
 
 const PINNED = [
   process.env.CX_CHROME,
+  // Newer images link the browser itself here; older ones kept it in a folder.
+  '/opt/pw-browsers/chromium',
   '/opt/pw-browsers/chromium/chrome-linux/chrome',
   '/opt/pw-browsers/chromium-1194/chrome-linux/chrome',
 ].filter(Boolean);
+
+/** A browser binary, not the folder one lives in. */
+function isFile(p) {
+  try {
+    return fs.statSync(p).isFile();
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Launch options for `chromium.launch()`.
@@ -27,6 +38,6 @@ const PINNED = [
  * and the right answer everywhere it applies.
  */
 export function launchOptions(extra = {}) {
-  const executablePath = PINNED.find((p) => fs.existsSync(p));
+  const executablePath = PINNED.find(isFile);
   return executablePath ? { executablePath, ...extra } : extra;
 }

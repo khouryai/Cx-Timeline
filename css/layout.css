@@ -338,58 +338,11 @@
 #dock.collapsed {
   display: none;
 }
-.dock-tabs {
-  display: flex;
-  align-items: center;
-  gap: 1px;
-  padding: 6px 6px 0;
-  border-bottom: 1px solid var(--border);
-  flex: 0 0 auto;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-.dock-tabs::-webkit-scrollbar {
-  display: none;
-}
-.dock-tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 6px 9px;
-  border-radius: 7px 7px 0 0;
-  font-family: var(--f-mono);
-  font-size: var(--fs-micro);
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--text-subtle);
-  border-bottom: 2px solid transparent;
-  margin-bottom: -1px;
-  white-space: nowrap;
-  transition: color var(--dur-fast) var(--easing), border-color var(--dur-fast) var(--easing),
-    background var(--dur-fast) var(--easing);
-}
-.dock-tab:hover {
-  color: var(--text-muted);
-  background: var(--surface-2);
-}
-.dock-tab.active {
-  color: var(--text-main);
-  border-bottom-color: var(--hitachi-red);
-}
 .dock-body {
   flex: 1 1 auto;
   overflow-y: auto;
   overflow-x: hidden;
   min-height: 0;
-}
-.dock-pane {
-  display: none;
-  flex-direction: column;
-  height: 100%;
-}
-.dock-pane.active {
-  display: flex;
 }
 
 /* Resizer handles */
@@ -512,12 +465,25 @@
   padding: 8px;
   min-height: 0;
 }
-.pane-foot {
-  padding: 8px;
-  border-top: 1px solid var(--border);
-  flex: 0 0 auto;
+
+/* The Add Objects pane's tools: two to a row, and a name too long to share a
+   row takes one of its own. A `1fr 1fr` grid let "Commissioning Campaign"
+   widen its column and push the tool beside it off the pane. Only a dock
+   dragged narrower than a single name shortens it, and the tooltip has it. */
+.palette-grid {
   display: flex;
-  gap: 6px;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.palette-grid > .cx-btn {
+  flex: 1 1 40%;
+  max-width: 100%;
+  justify-content: flex-start;
+}
+.palette-grid > .cx-btn > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ── Status bar ─────────────────────────────────────────────────────────── */
@@ -682,101 +648,38 @@ body.presenting #app {
   .sidenav-command kbd {
     display: none;
   }
+  /* The workspace switch and Present keep their icons and lose their words,
+     as the links do — at 56px "Timeline" was clipped to "TI" and Present
+     spilled out of the sidebar. */
+  .ws-switch {
+    flex-direction: column;
+    margin: 0 6px 8px;
+    padding: 2px;
+  }
+  .ws-btn {
+    padding: 7px 0;
+  }
+  .ws-btn span,
+  .sidenav-present span {
+    display: none;
+  }
+  .sidenav-footer {
+    padding: 9px 6px 12px;
+  }
+  .sidenav-present {
+    padding: 6px 0;
+  }
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
-   Account, access and sharing (hosted deployments)
-
-   None of this renders when config.js is blank — the application boots
-   straight into the canvas, exactly as the local-first build always has.
+   Messages, and who may edit
    ═══════════════════════════════════════════════════════════════════════ */
 
-/* ── The sign-in gate ──────────────────────────────────────────────────── */
-
-.cx-gate {
-  position: fixed;
-  inset: 0;
-  z-index: 4000;
-  display: grid;
-  place-items: center;
-  padding: 24px;
-  background: var(--bg);
-  /* The workspace is already mounted behind this; it must never flash. */
-  animation: cx-gate-in var(--dur-slow) var(--easing);
-}
-.cx-gate.done {
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 240ms var(--easing);
-}
-@keyframes cx-gate-in {
-  from { opacity: 0; }
-  to   { opacity: 1; }
-}
-
-.cx-gate-card {
-  width: min(400px, 100%);
-  padding: 30px 30px 24px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--surface);
-  box-shadow: var(--shadow-lg);
-}
-
-.cx-gate-brand {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  margin-bottom: 26px;
-}
-.cx-gate-name {
-  font-family: var(--f-mono);
-  font-size: var(--fs-small);
-  font-weight: 700;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--text-main);
-}
-.cx-gate-sub {
-  font-family: var(--f-mono);
-  font-size: var(--fs-micro);
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--text-subtle);
-}
-
-.cx-gate-title {
-  margin: 0 0 5px;
-  font-size: 21px;
-  font-weight: 650;
-  letter-spacing: -0.01em;
-  color: var(--text-main);
-}
-.cx-gate-lede {
-  margin-bottom: 20px;
-  font-size: var(--fs-small);
-  color: var(--text-muted);
-}
-
-.cx-gate-form {
-  display: flex;
-  flex-direction: column;
-  gap: 13px;
-}
-.cx-gate-form .cx-btn {
-  justify-content: center;
-  width: 100%;
-  padding: 9px;
-}
-.cx-gate-form .cx-btn.loading {
-  opacity: 0.65;
-  pointer-events: none;
-}
-
-.cx-gate-msg:empty {
+/* A sentence in a box: red when something failed, green with `.good`. */
+.cx-msg:empty {
   display: none;
 }
-.cx-gate-msg {
+.cx-msg {
   padding: 8px 10px;
   border-radius: var(--radius-sm);
   font-size: var(--fs-small);
@@ -784,38 +687,9 @@ body.presenting #app {
   background: color-mix(in srgb, var(--bad) 12%, transparent);
   color: var(--text-main);
 }
-.cx-gate-msg.good {
+.cx-msg.good {
   border-color: var(--good);
   background: color-mix(in srgb, var(--good) 12%, transparent);
-}
-
-.cx-gate-links {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
-  margin-top: 16px;
-}
-.cx-gate-link {
-  padding: 0;
-  border: 0;
-  background: none;
-  font: inherit;
-  font-size: var(--fs-small);
-  color: var(--accent);
-  cursor: pointer;
-}
-.cx-gate-link:hover {
-  text-decoration: underline;
-}
-
-.cx-gate-local {
-  margin-top: 20px;
-  padding-top: 16px;
-  border-top: 1px solid var(--border);
-  text-align: center;
-}
-.cx-gate-local .cx-btn {
-  margin-bottom: 5px;
 }
 
 /* ── Read-only ─────────────────────────────────────────────────────────── */
@@ -849,8 +723,8 @@ body.presenting #app {
 body.read-only #toolbar .tb-group.editing,
 body.read-only #toolbar .tb-group.editing + .tb-sep,
 body.read-only .nav-link[data-pane='palette'],
-body.read-only .ob-handle,
-body.read-only .ob-anchor {
+body.read-only .tl-handle,
+body.read-only .tl-anchor {
   display: none;
 }
 body.read-only .tl-obj {
@@ -864,62 +738,10 @@ body.read-only #inspector input,
 body.read-only #inspector textarea,
 body.read-only #inspector select,
 body.read-only #inspector .cx-btn:not(.ghost),
-body.read-only #inspector .cx-toggle,
+body.read-only #inspector .cx-switch,
 body.read-only #inspector .cx-swatch {
   pointer-events: none;
   opacity: 0.72;
-}
-
-/* ── Account block ─────────────────────────────────────────────────────── */
-
-.cx-account {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
-  padding: 7px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--surface-2);
-}
-.cx-account .acc-main {
-  flex: 1;
-  min-width: 0;
-}
-.cx-account .acc-name {
-  overflow: hidden;
-  font-size: var(--fs-small);
-  font-weight: 500;
-  color: var(--text);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.cx-account .acc-role {
-  font-family: var(--f-mono);
-  font-size: var(--fs-micro);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--text-subtle);
-}
-
-.acc-avatar {
-  display: grid;
-  flex: 0 0 auto;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  border-radius: 50%;
-  background: var(--accent);
-  color: #fff;
-  font-family: var(--f-mono);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-}
-.acc-avatar.small {
-  width: 22px;
-  height: 22px;
-  font-size: 9px;
 }
 
 /* The date window in force, on the toolbar, with its own way out. Hidden when

@@ -159,7 +159,3 @@ function onMouseMove(e) {
   renderer.requestRender();
 }
 
-/** Force a redraw — called after a resize. */
-export function refreshMinimap() {
-  scheduleDraw();
-}

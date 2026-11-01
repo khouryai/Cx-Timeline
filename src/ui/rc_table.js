@@ -28,7 +28,7 @@ import { icon } from './icons.js';
 import { saveFile } from '../io/exporters.js';
 
 /** Tables drawn as a grid, where reordering rows would change what they say. */
-const POSITIONAL = ['la-grid', 'rc-pto-grid', 'rc-huddle', 'rc-resources'];
+const POSITIONAL = ['la-grid', 'rc-pto-grid'];
 
 /** Taller than this and the frame scrolls on its own, so the header can stay. */
 const TALL_ROWS = 14;

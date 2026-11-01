@@ -234,6 +234,13 @@ function healthMessage(health) {
     case 'ontrack': return `Tracking to plan (${health.expected}% expected, ${health.actual}% reported).`;
     case 'done': return 'Complete.';
     case 'late': return `Planned date passed ${fmtDuration(health.days || 0)} ago.`;
+    /* Before its start date — but the work may have begun early, and saying
+       "not started" over 45% done contradicted the chips just above. */
+    case 'future':
+      if (!health.days) return 'Due today.';
+      if (health.label === 'Upcoming') return `Due in ${fmtDuration(health.days)}.`;
+      return `Planned to start in ${fmtDuration(health.days)}`
+        + (health.actual > 0 ? ` — ${health.actual}% already reported.` : '.');
     default: return 'Not started yet.';
   }
 }
@@ -361,7 +368,7 @@ function scheduleFields(obj, def) {
           onChange: (v) => set(obj.id, { end: endForDuration(obj.start, v) }, 'Change duration'),
         })),
         field('Remaining', el('div', {
-          class: 'cx-input mini',
+          class: 'cx-input',
           style: { display: 'flex', alignItems: 'center', color: 'var(--text-muted)', cursor: 'default' },
           text: fmtDuration(remainingDays(obj)),
         })),

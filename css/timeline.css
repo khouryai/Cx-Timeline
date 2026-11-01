@@ -16,9 +16,6 @@
   background: var(--canvas-bg);
   user-select: none;
 }
-.tl-root.no-gutter {
-  grid-template-columns: 0 1fr;
-}
 
 /* ── Corner ─────────────────────────────────────────────────────────────── */
 .tl-corner {
@@ -243,6 +240,11 @@
   cursor: default;
   /* Focused programmatically to reclaim keyboard control, never by tabbing. */
   outline: none;
+  /* Its own stacking context. What the canvas draws is ordered among itself
+     (a shift arrow at 140 above a bar), but none of it may rise above what
+     floats over the canvas — the legend, the navigator, the hint at 40–45 —
+     which a late-finish arrow did, painting across the open legend. */
+  isolation: isolate;
 }
 .tl-canvas.panning {
   cursor: grabbing;
@@ -313,9 +315,6 @@
     rgba(127, 127, 127, 0.035) 7px,
     rgba(127, 127, 127, 0.035) 14px
   );
-}
-.tl-lane-row.drop-active {
-  background: var(--selection-fill);
 }
 
 /* ── Objects ────────────────────────────────────────────────────────────── */
@@ -1147,13 +1146,6 @@ body.read-only .tl-baseline-reason {
   white-space: nowrap;
 }
 
-.tl-slip-arrow.slip {
-  background: var(--bad);
-}
-.tl-slip-arrow.ahead {
-  background: var(--good);
-}
-
 /* ── Connectors ─────────────────────────────────────────────────────────── */
 .tl-connectors {
   position: absolute;
@@ -1465,22 +1457,6 @@ body.read-only .tl-baseline-reason {
   font-family: var(--f-mono);
   font-size: 9px;
   color: var(--text-subtle);
-}
-
-/* ── Empty canvas state ─────────────────────────────────────────────────── */
-.tl-empty {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  pointer-events: none;
-  z-index: 4;
-}
-.tl-empty > * {
-  pointer-events: auto;
 }
 
 /* ── Presentation mode canvas tweaks ────────────────────────────────────── */

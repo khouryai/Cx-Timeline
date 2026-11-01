@@ -11,7 +11,7 @@
 
 import { el } from '../core/util.js';
 import { emit, EV } from '../core/events.js';
-import { toISO, todayMs, fmtDate, addDays, MS_DAY } from '../core/dates.js';
+import { toISO, todayMs, fmtDate, MS_DAY } from '../core/dates.js';
 import {
   resourceNames, readGrid, locationColumnOf, absencesFrom, ABSENCE_LABELS, ABSENCE_KINDS, cellTokens,
   cancellationEvents, supportCancellationEvents, attachCancellationNotes, bartCodes, isCancelMeaning,
@@ -79,16 +79,6 @@ export function weekStart(ms) {
   return ms - ((day + 6) % 7) * MS_DAY;
 }
 
-/** The five working days of a week, as ISO strings. */
-export function weekDays(startMs) {
-  return [0, 1, 2, 3, 4].map((n) => toISO(addDays(startMs, n)));
-}
-
-/** The seven days, for a view that has to show a weekend possession. */
-export function allWeekDays(startMs) {
-  return [0, 1, 2, 3, 4, 5, 6].map((n) => toISO(addDays(startMs, n)));
-}
-
 export function todayISO() {
   return toISO(todayMs());
 }
@@ -130,17 +120,6 @@ export function authorNames(people) {
     const key = String(id);
     return names.get(key) || (key.startsWith('name:') ? key.slice(5) : '');
   };
-}
-
-/** Group rows under a key, for a grid that is people down and days across. */
-export function groupBy(rows, key) {
-  const map = new Map();
-  for (const row of rows || []) {
-    const k = typeof key === 'function' ? key(row) : row[key];
-    if (!map.has(k)) map.set(k, []);
-    map.get(k).push(row);
-  }
-  return map;
 }
 
 /** A row was written. Whatever is on screen reloads. */
@@ -268,25 +247,6 @@ export const orgNav = { section: null };
 export function goToTab(tab) {
   emit(EV.RC_SHOW_TAB, { tab });
 }
-
-/**
- * The five statuses, split into the two families that must never be averaged.
- *
- * Performance is what an individual did. Health is what was done to them — a
- * possession released late is not underperformance, and counting it as such
- * would make the number worse than useless, because people would stop saying
- * they were blocked.
- */
-export const STATUSES = [
-  { id: 'completed', label: 'Completed', key: 'c', family: 'performance', tone: 'good' },
-  { id: 'partial', label: 'Partial', key: 'p', family: 'performance', tone: 'warn' },
-  { id: 'carried', label: 'Carried over', key: 'x', family: 'performance', tone: 'warn' },
-  { id: 'blocked', label: 'Blocked', key: 'b', family: 'health', tone: 'bad' },
-  { id: 'reassigned', label: 'Reassigned', key: 'r', family: 'health', tone: 'info' },
-  { id: 'absent', label: 'Away', key: 'a', family: 'absence', tone: 'muted' },
-];
-
-export const STATUS_BY_ID = new Map(STATUSES.map((s) => [s.id, s]));
 
 /**
  * The three shifts, in the words the team uses.
@@ -499,32 +459,6 @@ export function locationRegister(locations, aliases = []) {
     if (key) map.set(key, l.id);
   }
   return map;
-}
-
-/**
- * The spellings of a place the look-ahead uses that the register cannot place.
- *
- * The other half of pulling the location off the sheet. Keeping an unresolved
- * spelling is only worth doing if somebody is shown it, and this is what the
- * Resources tab lists — one click from "add it as a location" or "that is one we
- * already have", exactly as an unmatched name and an unmapped colour are. A
- * location nobody has mapped is work whose place is written down and not
- * grouped, which is the one thing that makes a report quietly wrong rather than
- * visibly incomplete.
- */
-export function unmatchedLocations(laRows, register) {
-  const seen = new Map();
-  for (const row of laRows || []) {
-    if (row.location_id) continue;
-    const written = String(row.raw_location || '').trim();
-    const key = foldName(written);
-    if (!key || register?.get(key)) continue;
-    const held = seen.get(key) || { name: written, rows: [], weeks: new Set() };
-    if (!held.rows.some((r) => r.id === row.id)) held.rows.push(row);
-    if (row.week_start) held.weeks.add(row.week_start);
-    seen.set(key, held);
-  }
-  return [...seen.values()].sort((a, b) => b.rows.length - a.rows.length);
 }
 
 /**
@@ -1149,38 +1083,6 @@ export function assignmentIndex({ planRows, laRows, register, absences = [], cat
     near: [...near, ...away.near],
     awayUnmatched: away.unmatched,
     derived: derived.size,
-  };
-}
-
-/**
- * How each drawn task went, from the huddle's outcomes.
- *
- * Returns `(entry, personId, iso) => outcome | null`. Indexed two ways because
- * an outcome points at one plan entry where there was one to point at, and at
- * nothing but a person and a date where the day was derived from the sheet — so
- * both keys are needed or the derived days, which are most of them, would show
- * no outcome at all. A stored entry is matched on its id and on nothing else:
- * two tasks on one day each carry their own note. A derived day takes whichever
- * outcome was recorded against the person and the date, preferring one that
- * points at no entry, because there is no row for it to point at.
- *
- * One function because the week plan and the phone's week both draw "how it
- * went" against a task, and two readings of one outcome is two answers.
- */
-export function outcomeLookup(actuals) {
-  const byEntry = new Map();
-  const byDay = new Map();
-  for (const row of actuals || []) {
-    if (row.plan_entry_id) byEntry.set(row.plan_entry_id, row);
-    const key = `${row.person_id}|${row.work_date}`;
-    if (!byDay.has(key)) byDay.set(key, []);
-    byDay.get(key).push(row);
-  }
-  return (entry, personId, iso) => {
-    if (entry?.id && byEntry.has(entry.id)) return byEntry.get(entry.id);
-    if (entry?.id) return null;
-    const day = byDay.get(`${personId}|${iso}`) || [];
-    return day.find((a) => !a.plan_entry_id) || day[0] || null;
   };
 }
 

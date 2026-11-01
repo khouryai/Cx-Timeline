@@ -38,10 +38,11 @@ jobs:
         run: node tools/build.js
       - name: Compare against what is committed
         run: |
-          # `grep -a`, not plain grep: the bundle carries bytes grep reads as
-          # binary, and it then prints "binary file matches" instead of the
-          # lines — which makes the comparison always succeed and the check
-          # worthless in exactly the case it exists for.
+          # `grep -a`, not plain grep: if the bundle ever carries a byte grep
+          # reads as binary — it did, from literal NULs in src/timeline/text.js
+          # — plain grep prints "binary file matches" instead of the lines,
+          # which makes the comparison always succeed and the check worthless
+          # in exactly the case it exists for.
           strip() { grep -av '^ \* Modules:' "$1"; }
           # Two bundles: the application and the calendar it loads on first use
           # — a stale one ships an app that disagrees with its source. Every

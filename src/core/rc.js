@@ -491,11 +491,6 @@ export function listLaEditsForRow(rowId) {
 /** Slim the grids of superseded editor readings past the keep period, and say how many. */
 export const compactSnapshots = () => rpc('rc_compact_snapshots', {});
 
-/** One reading's stored rows. */
-export function snapshotRows(snapshotId) {
-  return selectAll('rc_lookahead_rows', (q) => q.eq('snapshot_id', snapshotId).order('id'));
-}
-
 export function listSupportCodes({ includeRetired = false } = {}) {
   return select('rc_support_codes', (q) => (includeRetired ? q.order('sort').order('code') : q.eq('active', true).order('sort').order('code')));
 }
@@ -578,13 +573,6 @@ export function listLeaveKinds() {
 export function listLeave(fromISO, toISO) {
   return select('rc_leave', (q) =>
     q.lte('start_date', toISO).gte('end_date', fromISO).neq('status', 'cancelled'));
-}
-
-/** Look-ahead rows by id. */
-export async function lookaheadRowsByIds(ids) {
-  const unique = [...new Set((ids || []).filter(Boolean))];
-  if (!unique.length) return [];
-  return select('rc_lookahead_rows', (q) => q.in('id', unique), { columns: 'id,raw_label,raw_location,snapshot_id,sheet_row' });
 }
 
 export function listIngestRuns({ limit = 100 } = {}) {
@@ -736,11 +724,7 @@ export const addLocationAlias = (locationId, alias) =>
   insert('rc_location_alias', [{ location_id: locationId, alias }]).then((r) => r[0]);
 export const addPersonAlias = (personId, alias) =>
   insert('rc_person_alias', [{ person_id: personId, alias }]).then((r) => r[0]);
-export const addCategory = (row) => insert('rc_categories', [row]).then((r) => r[0]);
-export const updateCategory = (id, patch) => update('rc_categories', id, patch);
 export const addParty = (name) => insert('rc_parties', [{ name }]).then((r) => r[0]);
-export const addLeaveKind = (row) => insert('rc_leave_kinds', [row]).then((r) => r[0]);
-export const updateLeaveKind = (id, patch) => update('rc_leave_kinds', id, patch);
 
 /**
  * Map colours, or re-map them — an upsert on `(valid_from, argb)`, because
@@ -753,7 +737,6 @@ export const updateLegend = (id, patch) => update('rc_legend', id, patch);
 /** Delete a reference row where nothing has been recorded against it; retire it otherwise. */
 export const deletePerson = (id) => rpc('rc_delete_person', { p_person: id });
 export const deleteLocation = (id) => rpc('rc_delete_location', { p_location: id });
-export const deleteCategory = (id) => rpc('rc_delete_category', { p_category: id });
 export const deleteLegend = (id) => rpc('rc_delete_legend', { p_entry: id });
 
 /** Write a setting — an upsert, because the first time there is no row to update. */

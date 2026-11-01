@@ -12,13 +12,12 @@
  * objects were packed) rather than working out visibility for itself, so it
  * cannot disagree with what is on screen.
  *
- * Imports: util, events, store, access, icons, commands, pane_util.
+ * Imports: util, events, store, icons, commands, pane_util.
  */
 
 import { el } from '../core/util.js';
 import { on, EV } from '../core/events.js';
 import * as store from '../core/store.js';
-import { planLocked } from '../core/access.js';
 import { icon } from './icons.js';
 import * as cmd from './commands.js';
 import { goToPane } from './pane_util.js';
@@ -50,7 +49,6 @@ function update(laidOut) {
     return;
   }
 
-  const locked = planLocked();
   const filters = store.getFilters();
   const hidden = doc.objects.filter((o) => o.hidden).length;
   const windowSet = Boolean(filters.from || filters.to);
@@ -62,16 +60,12 @@ function update(laidOut) {
   const actions = [];
 
   if (!doc.objects.length) {
-    key = `empty:${locked}:${doc.lanes.length}`;
+    key = `empty:${doc.lanes.length}`;
     title = 'An empty plan';
-    message = locked
-      ? 'Nothing has been added to this plan yet, and this account may only read it.'
-      : 'Add the first activity, or bring a plan in from a file or a P6 export.';
-    if (!locked) {
-      if (doc.lanes.length) actions.push(action('Add an activity', 'plus', () => cmd.createObject('activity'), true));
-      else actions.push(action('Add a lane', 'layers', () => cmd.addLane(), true));
-      actions.push(action('Import…', 'upload', () => goToPane('io')));
-    }
+    message = 'Add the first activity, or bring a plan in from a file or a P6 export.';
+    if (doc.lanes.length) actions.push(action('Add an activity', 'plus', () => cmd.createObject('activity'), true));
+    else actions.push(action('Add a lane', 'layers', () => cmd.addLane(), true));
+    actions.push(action('Import…', 'upload', () => goToPane('io')));
   } else {
     key = `hidden:${windowSet}:${hidden}:${filtering}`;
     title = 'Nothing in view';

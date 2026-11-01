@@ -8,7 +8,7 @@
  * Imports: util, events, store, renderer, interactions, commands, components, panels.
  */
 
-import { hasMod, isTyping, IS_MAC } from '../core/util.js';
+import { hasMod, isTyping } from '../core/util.js';
 import { emit, EV } from '../core/events.js';
 import * as store from '../core/store.js';
 import * as renderer from '../timeline/renderer.js';
@@ -205,5 +205,3 @@ function onKeyDown(e) {
   }
 }
 
-/** Human-readable modifier name for help text. */
-export const MOD_LABEL = IS_MAC ? '⌘' : 'Ctrl';

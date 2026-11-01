@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 60   Built: 2026-10-28T17:03:52.259Z
+ * Modules: 60   Built: 2026-11-01T15:03:50.243Z
  */
 (function () {
   'use strict';
@@ -47,15 +47,6 @@ __mods["core/util.js"] = function (__x, __req) {
 
   function clamp(v, lo, hi) {
     return v < lo ? lo : v > hi ? hi : v;
-  }
-
-  function lerp(a, b, t) {
-    return a + (b - a) * t;
-  }
-
-  /** Round to `step`, e.g. round(37, 5) === 35. */
-  function roundTo(v, step) {
-    return step ? Math.round(v / step) * step : v;
   }
 
   /* ── Objects ───────────────────────────────────────────────────────────── */
@@ -132,24 +123,6 @@ __mods["core/util.js"] = function (__x, __req) {
       fn(...args);
     };
     return wrapped;
-  }
-
-  function throttle(fn, ms = 60) {
-    let last = 0;
-    let pending = null;
-    return (...args) => {
-      const now = Date.now();
-      if (now - last >= ms) {
-        last = now;
-        fn(...args);
-      } else {
-        clearTimeout(pending);
-        pending = setTimeout(() => {
-          last = Date.now();
-          fn(...args);
-        }, ms - (now - last));
-      }
-    };
   }
 
   /** requestAnimationFrame coalescer — many calls, one frame. */
@@ -251,19 +224,6 @@ __mods["core/util.js"] = function (__x, __req) {
     };
   }
 
-  function rgbToHex(r, g, b) {
-    const h = (v) => clamp(Math.round(v), 0, 255).toString(16).padStart(2, '0');
-    return `#${h(r)}${h(g)}${h(b)}`;
-  }
-
-  /** Mix two hex colours; t=0 → a, t=1 → b. */
-  function mixHex(a, b, t) {
-    const ca = hexToRgb(a);
-    const cb = hexToRgb(b);
-    if (!ca || !cb) return a;
-    return rgbToHex(lerp(ca.r, cb.r, t), lerp(ca.g, cb.g, t), lerp(ca.b, cb.b, t));
-  }
-
   function withAlpha(hex, alpha) {
     const c = hexToRgb(hex);
     if (!c) return hex;
@@ -313,10 +273,6 @@ __mods["core/util.js"] = function (__x, __req) {
 
   function $(sel, root = document) {
     return root.querySelector(sel);
-  }
-
-  function $$(sel, root = document) {
-    return Array.from(root.querySelectorAll(sel));
   }
 
   /** Remove every child without touching the parent node itself. */
@@ -438,14 +394,11 @@ __mods["core/util.js"] = function (__x, __req) {
 
   Object.defineProperty(__x, "uid", { get: () => uid, enumerable: true });
   Object.defineProperty(__x, "clamp", { get: () => clamp, enumerable: true });
-  Object.defineProperty(__x, "lerp", { get: () => lerp, enumerable: true });
-  Object.defineProperty(__x, "roundTo", { get: () => roundTo, enumerable: true });
   Object.defineProperty(__x, "deepClone", { get: () => deepClone, enumerable: true });
   Object.defineProperty(__x, "deepEqual", { get: () => deepEqual, enumerable: true });
   Object.defineProperty(__x, "merge", { get: () => merge, enumerable: true });
   Object.defineProperty(__x, "pick", { get: () => pick, enumerable: true });
   Object.defineProperty(__x, "debounce", { get: () => debounce, enumerable: true });
-  Object.defineProperty(__x, "throttle", { get: () => throttle, enumerable: true });
   Object.defineProperty(__x, "rafBatch", { get: () => rafBatch, enumerable: true });
   Object.defineProperty(__x, "escapeHtml", { get: () => escapeHtml, enumerable: true });
   Object.defineProperty(__x, "stripHtml", { get: () => stripHtml, enumerable: true });
@@ -455,14 +408,11 @@ __mods["core/util.js"] = function (__x, __req) {
   Object.defineProperty(__x, "fold", { get: () => fold, enumerable: true });
   Object.defineProperty(__x, "bytes", { get: () => bytes, enumerable: true });
   Object.defineProperty(__x, "hexToRgb", { get: () => hexToRgb, enumerable: true });
-  Object.defineProperty(__x, "rgbToHex", { get: () => rgbToHex, enumerable: true });
-  Object.defineProperty(__x, "mixHex", { get: () => mixHex, enumerable: true });
   Object.defineProperty(__x, "withAlpha", { get: () => withAlpha, enumerable: true });
   Object.defineProperty(__x, "luminance", { get: () => luminance, enumerable: true });
   Object.defineProperty(__x, "readableInk", { get: () => readableInk, enumerable: true });
   Object.defineProperty(__x, "el", { get: () => el, enumerable: true });
   Object.defineProperty(__x, "$", { get: () => $, enumerable: true });
-  Object.defineProperty(__x, "$$", { get: () => $$, enumerable: true });
   Object.defineProperty(__x, "clear", { get: () => clear, enumerable: true });
   Object.defineProperty(__x, "closestData", { get: () => closestData, enumerable: true });
   Object.defineProperty(__x, "download", { get: () => download, enumerable: true });
@@ -548,20 +498,13 @@ __mods["core/events.js"] = function (__x, __req) {
     }
   }
 
-  /** Remove every subscription — used by tests and teardown. */
-  function clearAll() {
-    listeners.clear();
-  }
-
   /**
    * The canonical event names. Using these constants (rather than bare strings)
    * keeps typos out and gives one place to see the whole application protocol.
    */
   const EV = {
     /* Document lifecycle */
-    DOC_LOADED: 'doc:loaded',
     DOC_CHANGED: 'doc:changed', // { reason, ids? } — any mutation to the project
-    DOC_META_CHANGED: 'doc:meta', // name/description/settings only
     DOC_REPLACED: 'doc:replaced', // wholesale swap (import, restore, new)
     LISTS_CHANGED: 'lists:changed', // { listId } — a dropdown vocabulary was edited
     P6_IMPORTED: 'p6:imported', // { kind, plan } — a Primavera export was applied
@@ -583,16 +526,11 @@ __mods["core/events.js"] = function (__x, __req) {
     /* History */
     HISTORY_CHANGED: 'history:changed', // { canUndo, canRedo, depth }
 
-    /* Account & sharing (hosted deployments only) */
-    AUTH_CHANGED: 'auth:changed', // { user } — signed in, signed out, session restored
-    ACCESS_CHANGED: 'access:changed', // { role, readOnly } — which project, and what you may do
+    /* Editing without the pen */
     EDIT_REFUSED: 'access:refused', // a write was attempted without permission
-    CLOUD_CONFLICT: 'cloud:conflict', // someone else saved the project first
 
-    /* The resource calendar — a separate module, with a separate backend and a
-       separate account. Deliberately not AUTH_CHANGED: signing in to the
-       calendar must not disturb the timeline, which needs no account at all. */
-    RC_AUTH_CHANGED: 'rc:auth', // { user, event }
+    /* The resource calendar — a separate module, behind its own pen. */
+    RC_AUTH_CHANGED: 'rc:auth', // { user, event } — the calendar was opened, created, or its folder changed
     RC_CHANGED: 'rc:changed', // { what } — a row was written; panes reload
     RC_PEN: 'rc:pen', // { role, holder } — who may write the calendar changed
     RC_SHOW_TAB: 'rc:tab', // { tab } — a tab asking for another; ui/rc.js owns the router
@@ -611,7 +549,6 @@ __mods["core/events.js"] = function (__x, __req) {
     SCALE_CHANGED: 'view:scale',
 
     /* Rendering */
-    RENDER_REQUESTED: 'render:request',
     RENDER_DONE: 'render:done',
 
     /* UI */
@@ -624,7 +561,6 @@ __mods["core/events.js"] = function (__x, __req) {
     PANE_REFRESH: 'panel:refresh',
     PANE_OPEN: 'panel:open', // { pane } — a pane asking for another one; the dock owns showPane()
     TOAST: 'ui:toast',
-    STATUS: 'ui:status',
     PRESENT_MODE: 'ui:present',
   };
 
@@ -632,7 +568,6 @@ __mods["core/events.js"] = function (__x, __req) {
   Object.defineProperty(__x, "once", { get: () => once, enumerable: true });
   Object.defineProperty(__x, "off", { get: () => off, enumerable: true });
   Object.defineProperty(__x, "emit", { get: () => emit, enumerable: true });
-  Object.defineProperty(__x, "clearAll", { get: () => clearAll, enumerable: true });
   Object.defineProperty(__x, "EV", { get: () => EV, enumerable: true });
 };
 
@@ -652,14 +587,11 @@ __mods["core/dates.js"] = function (__x, __req) {
    * Leaf module: imports nothing.
    */
 
-  const MS_MINUTE = 60_000;
-  const MS_HOUR = 3_600_000;
   const MS_DAY = 86_400_000;
   const MS_WEEK = MS_DAY * 7;
 
   const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
   const MONTHS_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-  const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
   const DAYS_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   const DAYS_MIN = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
 
@@ -688,13 +620,6 @@ __mods["core/dates.js"] = function (__x, __req) {
     return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
   }
 
-  /** Milliseconds → `YYYY-MM-DDTHH:MM` (UTC) for datetime inputs. */
-  function toISOMinutes(ms) {
-    if (!Number.isFinite(ms)) return '';
-    const d = new Date(ms);
-    return `${toISO(ms)}T${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
-  }
-
   function pad(n) {
     return String(n).padStart(2, '0');
   }
@@ -720,10 +645,6 @@ __mods["core/dates.js"] = function (__x, __req) {
     return Math.floor(ms / MS_DAY) * MS_DAY;
   }
 
-  function endOfDay(ms) {
-    return startOfDay(ms) + MS_DAY - 1;
-  }
-
   /** Start of week. `weekStart` is 0 (Sunday) or 1 (Monday, the default). */
   function startOfWeek(ms, weekStart = 1) {
     const d = startOfDay(ms);
@@ -735,11 +656,6 @@ __mods["core/dates.js"] = function (__x, __req) {
   function startOfMonth(ms) {
     const d = new Date(ms);
     return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
-  }
-
-  function endOfMonth(ms) {
-    const d = new Date(ms);
-    return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1) - MS_DAY;
   }
 
   function startOfQuarter(ms) {
@@ -989,20 +905,6 @@ __mods["core/dates.js"] = function (__x, __req) {
     workWeek = days === 5 ? 5 : 7;
   }
 
-  function getWorkWeek() {
-    return workWeek;
-  }
-
-  /** Relative phrasing against a reference date: "in 4 days", "2 weeks ago". */
-  function fmtRelative(ms, ref = todayMs()) {
-    const d = daysBetween(ref, ms);
-    if (d === 0) return 'today';
-    if (d === 1) return 'tomorrow';
-    if (d === -1) return 'yesterday';
-    const abs = fmtDuration(Math.abs(d));
-    return d > 0 ? `in ${abs}` : `${abs} ago`;
-  }
-
   /** Timestamp for version history and backups — local time, by design. */
   function fmtTimestamp(ms) {
     const d = new Date(ms);
@@ -1026,12 +928,6 @@ __mods["core/dates.js"] = function (__x, __req) {
     { id: 'quarter', label: 'Quarter', minPxPerDay: 0.55, step: MS_DAY * 91.3 },
     { id: 'year', label: 'Year', minPxPerDay: 0, step: MS_DAY * 365.25 },
   ];
-
-  /** The scale one rung coarser than `id` — used for the ruler's upper band. */
-  function coarserScale(id) {
-    const i = SCALES.findIndex((s) => s.id === id);
-    return SCALES[Math.min(SCALES.length - 1, i + 1)];
-  }
 
   /**
    * Generate ruler ticks for a scale across [fromMs, toMs].
@@ -1175,25 +1071,19 @@ __mods["core/dates.js"] = function (__x, __req) {
     return aStart < bEnd && bStart < aEnd;
   }
 
-  Object.defineProperty(__x, "MS_MINUTE", { get: () => MS_MINUTE, enumerable: true });
-  Object.defineProperty(__x, "MS_HOUR", { get: () => MS_HOUR, enumerable: true });
   Object.defineProperty(__x, "MS_DAY", { get: () => MS_DAY, enumerable: true });
   Object.defineProperty(__x, "MS_WEEK", { get: () => MS_WEEK, enumerable: true });
   Object.defineProperty(__x, "MONTHS", { get: () => MONTHS, enumerable: true });
   Object.defineProperty(__x, "MONTHS_SHORT", { get: () => MONTHS_SHORT, enumerable: true });
-  Object.defineProperty(__x, "DAYS", { get: () => DAYS, enumerable: true });
   Object.defineProperty(__x, "DAYS_SHORT", { get: () => DAYS_SHORT, enumerable: true });
   Object.defineProperty(__x, "DAYS_MIN", { get: () => DAYS_MIN, enumerable: true });
   Object.defineProperty(__x, "toMs", { get: () => toMs, enumerable: true });
   Object.defineProperty(__x, "toISO", { get: () => toISO, enumerable: true });
-  Object.defineProperty(__x, "toISOMinutes", { get: () => toISOMinutes, enumerable: true });
   Object.defineProperty(__x, "todayMs", { get: () => todayMs, enumerable: true });
   Object.defineProperty(__x, "localDayMs", { get: () => localDayMs, enumerable: true });
   Object.defineProperty(__x, "startOfDay", { get: () => startOfDay, enumerable: true });
-  Object.defineProperty(__x, "endOfDay", { get: () => endOfDay, enumerable: true });
   Object.defineProperty(__x, "startOfWeek", { get: () => startOfWeek, enumerable: true });
   Object.defineProperty(__x, "startOfMonth", { get: () => startOfMonth, enumerable: true });
-  Object.defineProperty(__x, "endOfMonth", { get: () => endOfMonth, enumerable: true });
   Object.defineProperty(__x, "startOfQuarter", { get: () => startOfQuarter, enumerable: true });
   Object.defineProperty(__x, "startOfYear", { get: () => startOfYear, enumerable: true });
   Object.defineProperty(__x, "addDays", { get: () => addDays, enumerable: true });
@@ -1214,11 +1104,8 @@ __mods["core/dates.js"] = function (__x, __req) {
   Object.defineProperty(__x, "fmtDate", { get: () => fmtDate, enumerable: true });
   Object.defineProperty(__x, "fmtDuration", { get: () => fmtDuration, enumerable: true });
   Object.defineProperty(__x, "setWorkWeek", { get: () => setWorkWeek, enumerable: true });
-  Object.defineProperty(__x, "getWorkWeek", { get: () => getWorkWeek, enumerable: true });
-  Object.defineProperty(__x, "fmtRelative", { get: () => fmtRelative, enumerable: true });
   Object.defineProperty(__x, "fmtTimestamp", { get: () => fmtTimestamp, enumerable: true });
   Object.defineProperty(__x, "SCALES", { get: () => SCALES, enumerable: true });
-  Object.defineProperty(__x, "coarserScale", { get: () => coarserScale, enumerable: true });
   Object.defineProperty(__x, "ticks", { get: () => ticks, enumerable: true });
   Object.defineProperty(__x, "snap", { get: () => snap, enumerable: true });
   Object.defineProperty(__x, "overlaps", { get: () => overlaps, enumerable: true });
@@ -1471,8 +1358,6 @@ __mods["core/model.js"] = function (__x, __req) {
     },
   };
 
-  const TYPE_IDS = Object.keys(TYPES);
-
   /** Types grouped for menus, preserving registry order. */
   function typeGroups() {
     const groups = new Map();
@@ -1667,16 +1552,6 @@ __mods["core/model.js"] = function (__x, __req) {
     return listOptions(listId).find((o) => o.id === id) || null;
   }
 
-  /**
-   * A value's descriptor, with a readable fallback for anything the list does
-   * not know about — an imported file may carry statuses this project has never
-   * seen, and showing the raw value beats showing nothing.
-   */
-  function listLabel(listId, id, fallback = '') {
-    if (!id) return fallback;
-    return listOption(listId, id)?.label || String(id);
-  }
-
   /** Status descriptor with a safe fallback for unknown values. */
   function statusOf(id) {
     const option = listOption('status', id);
@@ -1686,10 +1561,6 @@ __mods["core/model.js"] = function (__x, __req) {
 
   function subsystemOf(id) {
     return listOption('subsystem', id);
-  }
-
-  function severityOf(id) {
-    return listOption('severity', id);
   }
 
   /** Where a list's values live on an object — used for counting and reassigning. */
@@ -1765,9 +1636,6 @@ __mods["core/model.js"] = function (__x, __req) {
      it cannot go stale, and an import only has to carry four columns.
      ═══════════════════════════════════════════════════════════════════════ */
 
-  /** The two kinds of import. A progress import never touches the baseline. */
-  const P6_KINDS = ['baseline', 'progress'];
-
   function emptyRegister() {
     return {
       activities: {},   // activityId → entry
@@ -1809,10 +1677,6 @@ __mods["core/model.js"] = function (__x, __req) {
   function p6Activity(doc, activityId) {
     if (!activityId) return null;
     return p6Register(doc).activities[String(activityId)] || null;
-  }
-
-  function p6Count(doc) {
-    return Object.keys(p6Register(doc).activities).length;
   }
 
   /**
@@ -2883,23 +2747,6 @@ __mods["core/model.js"] = function (__x, __req) {
     return { start: min - pad, end: max + pad };
   }
 
-  /** Every distinct owner in the document, sorted. */
-  function ownersOf(doc) {
-    return Array.from(new Set(doc.objects.map((o) => o.owner).filter(Boolean))).sort();
-  }
-
-  /** Every distinct area in the document, sorted. */
-  function areasOf(doc) {
-    return Array.from(new Set(doc.objects.map((o) => o.area).filter(Boolean))).sort();
-  }
-
-  /** Every distinct tag in the document, sorted. */
-  function tagsOf(doc) {
-    const set = new Set();
-    for (const o of doc.objects) for (const t of o.tags || []) set.add(t);
-    return Array.from(set).sort();
-  }
-
   /** ISO date export helper used by CSV/PDF writers. */
   function isoOf(ms) {
     return toISO(ms);
@@ -2907,7 +2754,6 @@ __mods["core/model.js"] = function (__x, __req) {
 
   Object.defineProperty(__x, "SCHEMA_VERSION", { get: () => SCHEMA_VERSION, enumerable: true });
   Object.defineProperty(__x, "TYPES", { get: () => TYPES, enumerable: true });
-  Object.defineProperty(__x, "TYPE_IDS", { get: () => TYPE_IDS, enumerable: true });
   Object.defineProperty(__x, "typeGroups", { get: () => typeGroups, enumerable: true });
   Object.defineProperty(__x, "LIST_DEFS", { get: () => LIST_DEFS, enumerable: true });
   Object.defineProperty(__x, "LIST_IDS", { get: () => LIST_IDS, enumerable: true });
@@ -2917,21 +2763,17 @@ __mods["core/model.js"] = function (__x, __req) {
   Object.defineProperty(__x, "listOptions", { get: () => listOptions, enumerable: true });
   Object.defineProperty(__x, "listIds", { get: () => listIds, enumerable: true });
   Object.defineProperty(__x, "listOption", { get: () => listOption, enumerable: true });
-  Object.defineProperty(__x, "listLabel", { get: () => listLabel, enumerable: true });
   Object.defineProperty(__x, "statusOf", { get: () => statusOf, enumerable: true });
   Object.defineProperty(__x, "subsystemOf", { get: () => subsystemOf, enumerable: true });
-  Object.defineProperty(__x, "severityOf", { get: () => severityOf, enumerable: true });
   Object.defineProperty(__x, "listUsage", { get: () => listUsage, enumerable: true });
   Object.defineProperty(__x, "listValuesInUse", { get: () => listValuesInUse, enumerable: true });
   Object.defineProperty(__x, "LINK_TYPES", { get: () => LINK_TYPES, enumerable: true });
   Object.defineProperty(__x, "CONNECTOR_STYLES", { get: () => CONNECTOR_STYLES, enumerable: true });
   Object.defineProperty(__x, "linkTypeBetween", { get: () => linkTypeBetween, enumerable: true });
-  Object.defineProperty(__x, "P6_KINDS", { get: () => P6_KINDS, enumerable: true });
   Object.defineProperty(__x, "emptyRegister", { get: () => emptyRegister, enumerable: true });
   Object.defineProperty(__x, "makeP6Activity", { get: () => makeP6Activity, enumerable: true });
   Object.defineProperty(__x, "p6Register", { get: () => p6Register, enumerable: true });
   Object.defineProperty(__x, "p6Activity", { get: () => p6Activity, enumerable: true });
-  Object.defineProperty(__x, "p6Count", { get: () => p6Count, enumerable: true });
   Object.defineProperty(__x, "p6Dates", { get: () => p6Dates, enumerable: true });
   Object.defineProperty(__x, "p6Slip", { get: () => p6Slip, enumerable: true });
   Object.defineProperty(__x, "p6LinkedIds", { get: () => p6LinkedIds, enumerable: true });
@@ -2978,9 +2820,6 @@ __mods["core/model.js"] = function (__x, __req) {
   Object.defineProperty(__x, "actualRange", { get: () => actualRange, enumerable: true });
   Object.defineProperty(__x, "comparedRange", { get: () => comparedRange, enumerable: true });
   Object.defineProperty(__x, "projectExtent", { get: () => projectExtent, enumerable: true });
-  Object.defineProperty(__x, "ownersOf", { get: () => ownersOf, enumerable: true });
-  Object.defineProperty(__x, "areasOf", { get: () => areasOf, enumerable: true });
-  Object.defineProperty(__x, "tagsOf", { get: () => tagsOf, enumerable: true });
   Object.defineProperty(__x, "isoOf", { get: () => isoOf, enumerable: true });
 };
 
@@ -3300,154 +3139,6 @@ __mods["core/desktop.js"] = function (__x, __req) {
 };
 
 // ════════════════════════════════════════════════════════════════════════
-// core/access.js
-// ════════════════════════════════════════════════════════════════════════
-__mods["core/access.js"] = function (__x, __req) {
-  /**
-   * Who this session is allowed to be, as far as the *plan* is concerned.
-   *
-   * One boolean and a reason, in a leaf, because two modules that must never see
-   * each other both have to read it.
-   *
-   * The plan's edit gate lives in `core/store.js` — "a read-only session refuses
-   * edits at the store, not only in the CSS" — and the pen lives in
-   * `core/filestore.js`. The fact that decides it, on a calendar deployment, is
-   * the account's role in the *resource calendar*, which `core/rc.js` knows. But
-   * `core/rc.js` is the calendar's own Supabase client and the plan's storage path
-   * must never import it: that separation is what keeps proprietary plan data from
-   * ever reaching a backend, and it is enforced rather than intended.
-   *
-   * So nothing here imports anything and nothing here decides anything. A module
-   * that *may* see both — `main.js` — reads the role and states it, and the two
-   * modules that must not see the calendar read the statement instead. That is the
-   * same shape as `setDateOrder()` and `syncDurationBasis()`: a preference pushed
-   * down into a leaf, because a leaf cannot reach up for it.
-   *
-   * **Absent is editable.** A build with no calendar, local mode, and every test
-   * suite never call `lockPlan()` at all, so the lock is off and the timeline
-   * behaves exactly as it always has. Read-only is a thing somebody is told, never
-   * a default.
-   *
-   * Imports: nothing (leaf).
-   */
-
-  /** Why the plan is read-only for this session, or '' when it is not. */
-  let locked = '';
-
-  /**
-   * State that the signed-in account may not edit the plan at all.
-   *
-   * Pass a sentence naming the reason — it is shown to the person, and "you are
-   * a member of the calendar, so the plan is read-only" is a different situation
-   * from "a colleague has the pen" and must not be reported as though it were.
-   * Pass nothing to lift it.
-   */
-  function lockPlan(reason = '') {
-    locked = String(reason || '');
-  }
-
-  /** True when this account may not edit the plan, whoever holds the pen. */
-  function planLocked() {
-    return locked !== '';
-  }
-
-  /**
-   * Why, in the words the interface should use.
-   *
-   * Empty when nothing is locked. A caller showing this never has to decide how
-   * to word it, which is what stops three screens wording it three ways.
-   */
-  function lockReason() {
-    return locked;
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     The view that belongs to one account
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /**
-   * Which account is reading, as an opaque key, or '' for nobody.
-   *
-   * Set by `main.js` from whichever account the deployment actually has — the
-   * calendar's on a calendar build, the timeline's own on a hosted one. It is a
-   * key and never a name: it goes into a localStorage key, so two people sharing
-   * a browser profile get their own answers and nobody's name is written to disk
-   * by this.
-   */
-  let account = '';
-
-  function setAccount(key) {
-    account = String(key || '');
-  }
-
-  function accountKey() {
-    return account;
-  }
-
-  /**
-   * What somebody filtered, hid and compared against, remembered for them alone.
-   *
-   * This is here rather than in `core/storage.js` for a structural reason:
-   * `storage.js` imports `core/store.js`, so the store cannot import it back —
-   * the build rejects the cycle outright. A leaf both of them can read is the
-   * only place the answer can live.
-   *
-   * **Why it is per account rather than in the document.** The filter, the filter
-   * mode and which baseline is being compared against were `doc.settings`, which
-   * meant they travelled in the plan: one person narrowing to their own subsystem
-   * narrowed it for everybody who opened the file next, and turning a baseline on
-   * was an edit to a shared document. Worse, on the read-only side it did not
-   * work at all — a member selecting a baseline was refused, because the only way
-   * to record the choice was to write to a plan they may not write to.
-   *
-   * So the *reading* is nobody's but the reader's. It is in localStorage, keyed on
-   * the account and the plan, which means it is per browser profile as well — the
-   * same limitation every other browser-stored preference here has, and the honest
-   * one: there is no server to keep it on, and the plan is the one place it must
-   * not go.
-   *
-   * Every read and write is wrapped, because a private window, cleared site data
-   * or a blocked third-party context makes localStorage throw rather than return
-   * nothing. A view that cannot be remembered is a view that starts empty, which
-   * is exactly how it behaved before any of this.
-   */
-  const VIEW_PREFIX = 'cxtl.view.';
-
-  function viewKey(scope) {
-    return `${VIEW_PREFIX}${account || 'anon'}.${String(scope || 'plan')}`;
-  }
-
-  /** What this account last looked at in this plan, or null. */
-  function readView(scope) {
-    try {
-      const raw = localStorage.getItem(viewKey(scope));
-      if (!raw) return null;
-      const value = JSON.parse(raw);
-      return value && typeof value === 'object' ? value : null;
-    } catch {
-      return null;
-    }
-  }
-
-  /** Remember it. Best-effort by design — see above. */
-  function writeView(scope, value) {
-    try {
-      localStorage.setItem(viewKey(scope), JSON.stringify(value));
-    } catch {
-      /* a view that cannot be remembered simply starts empty */
-    }
-  }
-
-  Object.defineProperty(__x, "lockPlan", { get: () => lockPlan, enumerable: true });
-  Object.defineProperty(__x, "planLocked", { get: () => planLocked, enumerable: true });
-  Object.defineProperty(__x, "lockReason", { get: () => lockReason, enumerable: true });
-  Object.defineProperty(__x, "setAccount", { get: () => setAccount, enumerable: true });
-  Object.defineProperty(__x, "accountKey", { get: () => accountKey, enumerable: true });
-  Object.defineProperty(__x, "readView", { get: () => readView, enumerable: true });
-  Object.defineProperty(__x, "writeView", { get: () => writeView, enumerable: true });
-};
-
-// ════════════════════════════════════════════════════════════════════════
 // core/folder_rules.js
 // ════════════════════════════════════════════════════════════════════════
 __mods["core/folder_rules.js"] = function (__x, __req) {
@@ -3684,7 +3375,6 @@ __mods["core/filestore.js"] = function (__x, __req) {
 
   const { emit, EV } = __req("core/events.js");
   const desktop = __req("core/desktop.js");
-  const { planLocked, lockReason } = __req("core/access.js");
   const rules = __req("core/folder_rules.js");
   /* The pure rules — names, digests, whose turn the pen is — tested in Node. */
   const {
@@ -4972,16 +4662,6 @@ __mods["core/filestore.js"] = function (__x, __req) {
    */
   async function takeOver() {
     if (!isConnected()) return false;
-    /* …with one exception, and it is not a race: an account that may not edit the
-       plan at all has no turn to take. The pen is who goes next among people who
-       *can* write; `planLocked()` says this account never can, so taking it would
-       hand out a pen that the store would refuse the first edit from — read-only
-       with a different explanation, which is worse than read-only. */
-    if (planLocked()) {
-      const err = new Error(lockReason());
-      err.kind = 'forbidden';
-      throw err;
-    }
     // Stated in our own claim rather than by overwriting theirs: they find out by
     // reading, on their next poll, and drop to read-only the same way we would.
     takeoverAt = Date.now();
@@ -5042,20 +4722,10 @@ __mods["core/filestore.js"] = function (__x, __req) {
    */
   async function requestPen() {
     if (!isConnected() || role === 'editor') return false;
-    // Nothing to ask for: see `takeOver()`.
-    if (planLocked()) return false;
     requestedAt = Date.now();
     await writeClaim();
     emitState();
     return true;
-  }
-
-  /** Stop asking — the caller took over, or gave up. */
-  function withdrawRequest() {
-    if (!requestedAt) return;
-    requestedAt = 0;
-    writeClaim();
-    emitState();
   }
 
   /**
@@ -5500,7 +5170,6 @@ __mods["core/filestore.js"] = function (__x, __req) {
   Object.defineProperty(__x, "takeOver", { get: () => takeOver, enumerable: true });
   Object.defineProperty(__x, "lockStatus", { get: () => lockStatus, enumerable: true });
   Object.defineProperty(__x, "requestPen", { get: () => requestPen, enumerable: true });
-  Object.defineProperty(__x, "withdrawRequest", { get: () => withdrawRequest, enumerable: true });
   Object.defineProperty(__x, "yieldPen", { get: () => yieldPen, enumerable: true });
   Object.defineProperty(__x, "checkLock", { get: () => checkLock, enumerable: true });
   Object.defineProperty(__x, "handleUnload", { get: () => handleUnload, enumerable: true });
@@ -5521,6 +5190,82 @@ __mods["core/filestore.js"] = function (__x, __req) {
   Object.defineProperty(__x, "getBlob", { get: () => getBlob, enumerable: true });
   Object.defineProperty(__x, "deleteBlob", { get: () => deleteBlob, enumerable: true });
   Object.defineProperty(__x, "blobUsage", { get: () => blobUsage, enumerable: true });
+};
+
+// ════════════════════════════════════════════════════════════════════════
+// core/access.js
+// ════════════════════════════════════════════════════════════════════════
+__mods["core/access.js"] = function (__x, __req) {
+  /**
+   * The view that is the reader's alone: what somebody filtered, hid and
+   * compared against, remembered for them and never written into the plan.
+   *
+   * Who may *edit* the plan is not decided here. It is the shared folder's pen
+   * (`core/filestore.js`) and, beneath that, the folder's own sharing — a
+   * read-only OneDrive share cannot write whatever this application believes.
+   * The plan lock that once lived here, set from a calendar account's role, went
+   * with the accounts.
+   *
+   * Imports: nothing (leaf).
+   */
+
+  /**
+   * Why this is here rather than in `core/storage.js` is structural:
+   * `storage.js` imports `core/store.js`, so the store cannot import it back —
+   * the build rejects the cycle outright. A leaf both of them can read is the
+   * only place the answer can live.
+   *
+   * **Why it is the reader's rather than in the document.** The filter, the
+   * filter mode and which baseline is being compared against were
+   * `doc.settings`, which meant they travelled in the plan: one person narrowing
+   * to their own subsystem narrowed it for everybody who opened the file next,
+   * and turning a baseline on was an edit to a shared document. Worse, on the
+   * read-only side it did not work at all — selecting a baseline was refused,
+   * because the only way to record the choice was to write to a plan the reader
+   * may not write to.
+   *
+   * So the *reading* is nobody's but the reader's. It is in localStorage, keyed
+   * on the plan, which means it is per browser profile — the same limitation
+   * every other browser-stored preference here has, and the honest one: the plan
+   * is the one place it must not go.
+   *
+   * Every read and write is wrapped, because a private window, cleared site data
+   * or a blocked third-party context makes localStorage throw rather than return
+   * nothing. A view that cannot be remembered is a view that starts empty, which
+   * is exactly how it behaved before any of this.
+   */
+  const VIEW_PREFIX = 'cxtl.view.';
+
+  /* `anon` is where every view has always been kept: the key once carried a
+     signed-in account, and no build has had one since. Kept, so nobody's
+     remembered filters move. */
+  function viewKey(scope) {
+    return `${VIEW_PREFIX}anon.${String(scope || 'plan')}`;
+  }
+
+  /** What this reader last looked at in this plan, or null. */
+  function readView(scope) {
+    try {
+      const raw = localStorage.getItem(viewKey(scope));
+      if (!raw) return null;
+      const value = JSON.parse(raw);
+      return value && typeof value === 'object' ? value : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Remember it. Best-effort by design — see above. */
+  function writeView(scope, value) {
+    try {
+      localStorage.setItem(viewKey(scope), JSON.stringify(value));
+    } catch {
+      /* a view that cannot be remembered simply starts empty */
+    }
+  }
+
+  Object.defineProperty(__x, "readView", { get: () => readView, enumerable: true });
+  Object.defineProperty(__x, "writeView", { get: () => writeView, enumerable: true });
 };
 
 // ════════════════════════════════════════════════════════════════════════
@@ -7321,7 +7066,8 @@ __mods["core/store.js"] = function (__x, __req) {
    * which updates the document without touching history; the interaction
    * commits once with a single `edit()` when the pointer is released.
    *
-   * On a hosted deployment a project can be open read-only. Because every write
+   * A plan in the shared folder is read-only while a colleague holds its pen.
+   * Because every write
    * funnels through the three entry points below, one guard covers the whole
    * application — there is no path to a mutation that does not pass through
    * here. The write guard in `core/filestore.js` is what keeps a colleague's
@@ -7339,8 +7085,8 @@ __mods["core/store.js"] = function (__x, __req) {
      through, autosave was refused by the folder, and the work was marked saved
      without ever having been written anywhere. */
   const { isViewer: folderViewer } = __req("core/filestore.js");
-  const { planLocked, readView, writeView } = __req("core/access.js");
-  const { normalise, makeProject, makeObject, makeLane, makeLink, effectiveToday, TYPES, syncLists, defaultLists, LIST_DEFS, listUsage, emptyRegister, makeP6Activity, p6Register, p6Activity, p6Dates, p6PlacedIds, p6LinkedIds, p6RollUp, makeP6Baseline, baselineSnapshot, syncDurationBasis, emptyLookahead, lookaheadRegister, lookaheadActivity, makeLookaheadEntry, laLinkedIds, laPlacedIds, laRollUp } = __req("core/model.js");
+  const { readView, writeView } = __req("core/access.js");
+  const { normalise, makeProject, makeObject, makeLane, makeLink, effectiveToday, TYPES, syncLists, defaultLists, LIST_DEFS, listUsage, emptyRegister, makeP6Activity, p6Activity, p6Dates, p6LinkedIds, p6RollUp, makeP6Baseline, baselineSnapshot, syncDurationBasis, emptyLookahead, lookaheadRegister, lookaheadActivity, makeLookaheadEntry, laLinkedIds, laPlacedIds, laRollUp } = __req("core/model.js");
 
 
 
@@ -7410,15 +7156,9 @@ __mods["core/store.js"] = function (__x, __req) {
     return true;
   }
 
-  /**
-   * True when the open plan is read-only in this session.
-   *
-   * Two different facts, and either is enough: a colleague may hold the pen on
-   * the folder, or this session may not edit the plan at all, which is what
-   * `planLocked()` says — unlike the pen, that is not a turn somebody can take.
-   */
+  /** True when the open plan is read-only in this session: a colleague holds the pen on the folder. */
   function isDocReadOnly() {
-    return folderViewer() || planLocked();
+    return folderViewer();
   }
 
   /* ── Indexing ──────────────────────────────────────────────────────────── */
@@ -7462,13 +7202,6 @@ __mods["core/store.js"] = function (__x, __req) {
       if (lane && (includeHidden || !lane.hidden)) out.push(lane);
     }
     return out;
-  }
-
-  /** Objects belonging to a lane, sorted by z then start. */
-  function objectsInLane(laneId) {
-    return doc.objects
-      .filter((o) => o.lane === laneId)
-      .sort((a, b) => a.z - b.z || a.start - b.start);
   }
 
   function today() {
@@ -7601,11 +7334,6 @@ __mods["core/store.js"] = function (__x, __req) {
     emit(EV.DOC_CHANGED, { reason: 'preview-cancel', transient: true });
   }
 
-  /** True while a gesture is staging changes outside history. */
-  function hasPreview() {
-    return previewBase !== null;
-  }
-
   /**
    * Change settings or view state that should persist but never appear in the
    * undo stack (zoom level, panel widths, the active dock tab).
@@ -7705,10 +7433,6 @@ __mods["core/store.js"] = function (__x, __req) {
     emit(EV.SELECTION_CHANGED, { ids: getSelection() });
   }
 
-  function addToSelection(ids) {
-    setSelection([...getSelection(), ...[].concat(ids)]);
-  }
-
   function toggleSelection(id) {
     const next = new Set(ui.selection);
     if (next.has(id)) next.delete(id);
@@ -7746,10 +7470,6 @@ __mods["core/store.js"] = function (__x, __req) {
     if (ui.tool === tool) return;
     ui.tool = tool;
     emit(EV.TOOL_CHANGED, { tool });
-  }
-
-  function getHover() {
-    return ui.hoverId;
   }
 
   function setHover(id) {
@@ -8055,11 +7775,16 @@ __mods["core/store.js"] = function (__x, __req) {
   /* ── Settings ──────────────────────────────────────────────────────────── */
 
   /**
-   * Settings that describe how input behaves rather than how the plan reads.
-   * These are preferences, so they persist but stay out of the undo stack —
-   * pressing Ctrl+Z should never silently change your snapping back.
+   * Settings that describe how input behaves rather than how the plan reads —
+   * and the theme, which is this computer's (`ui/theme.js`) and is mirrored here
+   * only for a computer that has none. These are preferences, so they persist
+   * but stay out of the undo stack — pressing Ctrl+Z should never silently
+   * change your snapping back. The theme was an undoable edit, so it filled the
+   * history with "Change theme", Ctrl+Z put the stored value back while the
+   * screen stayed as it was, and switching it without the pen was refused with a
+   * read-only notice.
    */
-  const INPUT_PREFERENCES = new Set(['snap', 'wheelMode', 'weekStart', 'dateOrder']);
+  const INPUT_PREFERENCES = new Set(['snap', 'wheelMode', 'weekStart', 'dateOrder', 'theme']);
 
   /**
    * Settings that say how somebody is *looking* at the plan, not what it says.
@@ -8075,7 +7800,7 @@ __mods["core/store.js"] = function (__x, __req) {
    * They still live on `doc.settings`, because the renderer, the layout packer and
    * every exporter read them from there and a second answer would be a second
    * place to look. What changed is who owns the value: it is set quietly, never
-   * enters history, never marks the plan unsaved, and is remembered per account in
+   * enters history, never marks the plan unsaved, and is remembered per plan in
    * `core/access.js` instead of being saved with the document.
    */
   const VIEW_PREFERENCES = new Set(['filterMode', 'activeBaseline', 'showBaseline']);
@@ -8100,13 +7825,13 @@ __mods["core/store.js"] = function (__x, __req) {
     });
   }
 
-  /* ── The view that belongs to one account ──────────────────────────────── */
+  /* ── The view that belongs to the reader ───────────────────────────────── */
 
   /** True while `restoreAccountView()` is applying, so it does not write back its own read. */
   let restoring = false;
 
   /**
-   * Remember how this account is looking at this plan.
+   * Remember how this reader is looking at this plan.
    *
    * Keyed on the document's id, so opening a different plan is a different view
    * rather than the last one's filter applied to somebody else's bars. Called from
@@ -8377,16 +8102,8 @@ __mods["core/store.js"] = function (__x, __req) {
      The P6 register
      ═══════════════════════════════════════════════════════════════════════ */
 
-  function getP6() {
-    return p6Register(doc);
-  }
-
   function getP6Activity(id) {
     return p6Activity(doc, id);
-  }
-
-  function placedP6Ids() {
-    return p6PlacedIds(doc);
   }
 
   /**
@@ -8451,13 +8168,6 @@ __mods["core/store.js"] = function (__x, __req) {
       register.history = [{ kind, ...stamp }, ...(register.history || [])].slice(0, 12);
       d.p6 = register;
       ensureP6Baselines(d);
-    });
-  }
-
-  /** Forget every imported activity. Objects keep their links, harmlessly. */
-  function clearP6() {
-    return edit('Clear the P6 register', (d) => {
-      d.p6 = emptyRegister();
     });
   }
 
@@ -8644,16 +8354,6 @@ __mods["core/store.js"] = function (__x, __req) {
 
   /* ── Testing seam ──────────────────────────────────────────────────────── */
 
-  /** Reset the store to a known state. Used by the headless test harness. */
-  function __resetForTests(nextDoc) {
-    doc = normalise(nextDoc || makeProject());
-    history = new History();
-    ui.selection.clear();
-    previewBase = null;
-    dirty = false;
-    reindex();
-  }
-
   /* ══════════════════════════════════════════════════════════════════════════
      The look-ahead register
      ═══════════════════════════════════════════════════════════════════════ */
@@ -8834,7 +8534,6 @@ __mods["core/store.js"] = function (__x, __req) {
   Object.defineProperty(__x, "getObject", { get: () => getObject, enumerable: true });
   Object.defineProperty(__x, "getLane", { get: () => getLane, enumerable: true });
   Object.defineProperty(__x, "orderedLanes", { get: () => orderedLanes, enumerable: true });
-  Object.defineProperty(__x, "objectsInLane", { get: () => objectsInLane, enumerable: true });
   Object.defineProperty(__x, "today", { get: () => today, enumerable: true });
   Object.defineProperty(__x, "isDirty", { get: () => isDirty, enumerable: true });
   Object.defineProperty(__x, "markClean", { get: () => markClean, enumerable: true });
@@ -8842,7 +8541,6 @@ __mods["core/store.js"] = function (__x, __req) {
   Object.defineProperty(__x, "preview", { get: () => preview, enumerable: true });
   Object.defineProperty(__x, "previewObjects", { get: () => previewObjects, enumerable: true });
   Object.defineProperty(__x, "cancelPreview", { get: () => cancelPreview, enumerable: true });
-  Object.defineProperty(__x, "hasPreview", { get: () => hasPreview, enumerable: true });
   Object.defineProperty(__x, "editQuiet", { get: () => editQuiet, enumerable: true });
   Object.defineProperty(__x, "replaceDoc", { get: () => replaceDoc, enumerable: true });
   Object.defineProperty(__x, "historyState", { get: () => historyState, enumerable: true });
@@ -8854,13 +8552,11 @@ __mods["core/store.js"] = function (__x, __req) {
   Object.defineProperty(__x, "selectedObjects", { get: () => selectedObjects, enumerable: true });
   Object.defineProperty(__x, "isSelected", { get: () => isSelected, enumerable: true });
   Object.defineProperty(__x, "setSelection", { get: () => setSelection, enumerable: true });
-  Object.defineProperty(__x, "addToSelection", { get: () => addToSelection, enumerable: true });
   Object.defineProperty(__x, "toggleSelection", { get: () => toggleSelection, enumerable: true });
   Object.defineProperty(__x, "clearSelection", { get: () => clearSelection, enumerable: true });
   Object.defineProperty(__x, "selectAll", { get: () => selectAll, enumerable: true });
   Object.defineProperty(__x, "getTool", { get: () => getTool, enumerable: true });
   Object.defineProperty(__x, "setTool", { get: () => setTool, enumerable: true });
-  Object.defineProperty(__x, "getHover", { get: () => getHover, enumerable: true });
   Object.defineProperty(__x, "setHover", { get: () => setHover, enumerable: true });
   Object.defineProperty(__x, "getFilters", { get: () => getFilters, enumerable: true });
   Object.defineProperty(__x, "setFilters", { get: () => setFilters, enumerable: true });
@@ -8906,11 +8602,8 @@ __mods["core/store.js"] = function (__x, __req) {
   Object.defineProperty(__x, "removeListOption", { get: () => removeListOption, enumerable: true });
   Object.defineProperty(__x, "moveListOption", { get: () => moveListOption, enumerable: true });
   Object.defineProperty(__x, "resetList", { get: () => resetList, enumerable: true });
-  Object.defineProperty(__x, "getP6", { get: () => getP6, enumerable: true });
   Object.defineProperty(__x, "getP6Activity", { get: () => getP6Activity, enumerable: true });
-  Object.defineProperty(__x, "placedP6Ids", { get: () => placedP6Ids, enumerable: true });
   Object.defineProperty(__x, "importP6", { get: () => importP6, enumerable: true });
-  Object.defineProperty(__x, "clearP6", { get: () => clearP6, enumerable: true });
   Object.defineProperty(__x, "placeP6Activity", { get: () => placeP6Activity, enumerable: true });
   Object.defineProperty(__x, "linkP6", { get: () => linkP6, enumerable: true });
   Object.defineProperty(__x, "unlinkP6", { get: () => unlinkP6, enumerable: true });
@@ -8921,7 +8614,6 @@ __mods["core/store.js"] = function (__x, __req) {
   Object.defineProperty(__x, "groupObjects", { get: () => groupObjects, enumerable: true });
   Object.defineProperty(__x, "ungroupObjects", { get: () => ungroupObjects, enumerable: true });
   Object.defineProperty(__x, "expandGroupSelection", { get: () => expandGroupSelection, enumerable: true });
-  Object.defineProperty(__x, "__resetForTests", { get: () => __resetForTests, enumerable: true });
   Object.defineProperty(__x, "getLookaheadActivity", { get: () => getLookaheadActivity, enumerable: true });
   Object.defineProperty(__x, "importLookahead", { get: () => importLookahead, enumerable: true });
   Object.defineProperty(__x, "clearLookahead", { get: () => clearLookahead, enumerable: true });
@@ -8988,7 +8680,6 @@ __mods["core/storage.js"] = function (__x, __req) {
   let usingFallback = false;
   let editsSinceBackup = 0;
   let backupTimer = null;
-  let lastSaveError = null;
 
   /**
    * True once a plan in a connected folder is the live document. Everything that
@@ -9179,39 +8870,6 @@ __mods["core/storage.js"] = function (__x, __req) {
     }
   }
 
-  /** Every project on disk, newest first — the "Open project" dialog uses this. */
-  async function listProjects() {
-    if (usingFallback) {
-      const d = lsGetJSON(LS_DOC);
-      return d ? [{ id: d.id, name: d.name, savedAt: d.modified, objects: (d.objects || []).length }] : [];
-    }
-    try {
-      const all = await wrap(tx(STORE_PROJECTS).getAll());
-      return all
-        .map((r) => ({ id: r.id, name: r.doc?.name || 'Untitled', savedAt: r.savedAt, objects: (r.doc?.objects || []).length }))
-        .sort((a, b) => b.savedAt - a.savedAt);
-    } catch {
-      return [];
-    }
-  }
-
-  async function loadProject(id) {
-    if (usingFallback) {
-      const d = lsGetJSON(LS_DOC);
-      return d && d.id === id ? d : null;
-    }
-    const record = await wrap(tx(STORE_PROJECTS).get(id));
-    return record ? record.doc : null;
-  }
-
-  async function deleteProject(id) {
-    if (usingFallback) {
-      localStorage.removeItem(LS_DOC);
-      return;
-    }
-    await wrap(tx(STORE_PROJECTS, 'readwrite').delete(id));
-  }
-
   /* ── Saving ────────────────────────────────────────────────────────────── */
 
   /**
@@ -9267,7 +8925,6 @@ __mods["core/storage.js"] = function (__x, __req) {
       }
 
       markClean();
-      lastSaveError = null;
       emit(EV.SAVE_DONE, { at: record.savedAt });
 
       editsSinceBackup++;
@@ -9278,7 +8935,6 @@ __mods["core/storage.js"] = function (__x, __req) {
       }
       return true;
     } catch (err) {
-      lastSaveError = err;
       console.error('[cx-timeline] save failed:', err);
       emit(EV.SAVE_ERROR, { error: err });
       // A quota failure is the common case; surface it rather than silently
@@ -9315,10 +8971,6 @@ __mods["core/storage.js"] = function (__x, __req) {
   const scheduleSave = debounce(() => {
     saveNow();
   }, 500);
-
-  function getLastSaveError() {
-    return lastSaveError;
-  }
 
   function wireAutosave() {
     on(EV.DOC_CHANGED, (payload) => {
@@ -9626,11 +9278,7 @@ __mods["core/storage.js"] = function (__x, __req) {
   Object.defineProperty(__x, "leaveFolder", { get: () => leaveFolder, enumerable: true });
   Object.defineProperty(__x, "isFileMode", { get: () => isFileMode, enumerable: true });
   Object.defineProperty(__x, "isFallback", { get: () => isFallback, enumerable: true });
-  Object.defineProperty(__x, "listProjects", { get: () => listProjects, enumerable: true });
-  Object.defineProperty(__x, "loadProject", { get: () => loadProject, enumerable: true });
-  Object.defineProperty(__x, "deleteProject", { get: () => deleteProject, enumerable: true });
   Object.defineProperty(__x, "saveNow", { get: () => saveNow, enumerable: true });
-  Object.defineProperty(__x, "getLastSaveError", { get: () => getLastSaveError, enumerable: true });
   Object.defineProperty(__x, "takeRecovery", { get: () => takeRecovery, enumerable: true });
   Object.defineProperty(__x, "refreshBackupSchedule", { get: () => refreshBackupSchedule, enumerable: true });
   Object.defineProperty(__x, "makeBackup", { get: () => makeBackup, enumerable: true });
@@ -9664,7 +9312,7 @@ __mods["core/analysis.js"] = function (__x, __req) {
    * Imports: dates, model.
    */
 
-  const { MS_DAY, daysBetween, workingDaysBetween } = __req("core/dates.js");
+  const { MS_DAY, daysBetween } = __req("core/dates.js");
   const { TYPES, LINK_TYPES, effectiveToday, baselineSnapshot, delayReason, comparedRange } = __req("core/model.js");
 
 
@@ -10101,7 +9749,7 @@ __mods["core/analysis.js"] = function (__x, __req) {
     if (!def?.duration) {
       if (obj.status === 'complete' || obj.status === 'released' || obj.status === 'closed') return { state: 'done', label: 'Complete' };
       if (obj.start < today) return { state: 'late', label: 'Date passed', days: daysBetween(obj.start, today) };
-      return { state: 'future', label: 'Upcoming' };
+      return { state: 'future', label: 'Upcoming', days: daysBetween(today, obj.start) };
     }
 
     const total = Math.max(1, obj.end - obj.start);
@@ -10111,7 +9759,7 @@ __mods["core/analysis.js"] = function (__x, __req) {
 
     if (actual >= 100) return { state: 'done', label: 'Complete', expected, actual, variance: 100 - expected };
     if (today > obj.end) return { state: 'overdue', label: 'Overdue', expected: 100, actual, variance: actual - 100, days: daysBetween(obj.end, today) };
-    if (today < obj.start) return { state: 'future', label: 'Not started', expected: 0, actual, variance: actual };
+    if (today < obj.start) return { state: 'future', label: 'Not started', expected: 0, actual, variance: actual, days: daysBetween(today, obj.start) };
 
     const variance = actual - expected;
     if (variance < -15) return { state: 'behind', label: 'Behind plan', expected, actual, variance };
@@ -10145,35 +9793,6 @@ __mods["core/analysis.js"] = function (__x, __req) {
     };
   }
 
-  /**
-   * Slip analysis relative to a baseline, grouped by lane — the view a
-   * commissioning manager actually wants in a progress meeting.
-   */
-  function slipByLane(doc, baseline) {
-    const { rows } = compareBaseline(doc, baseline);
-    const byLane = new Map();
-    for (const row of rows) {
-      if (!row.current) continue;
-      const laneId = row.current.lane;
-      if (!byLane.has(laneId)) byLane.set(laneId, { laneId, slip: 0, count: 0, worst: 0, rows: [] });
-      const entry = byLane.get(laneId);
-      entry.count++;
-      entry.slip += row.endShift;
-      entry.worst = Math.max(entry.worst, row.endShift);
-      entry.rows.push(row);
-    }
-    return Array.from(byLane.values()).sort((a, b) => b.worst - a.worst);
-  }
-
-  /**
-   * Working days remaining on an object, honouring the project's holiday list.
-   */
-  function workingDaysRemaining(obj, today, holidays = []) {
-    if (!TYPES[obj.type]?.duration) return 0;
-    const from = Math.max(today, obj.start);
-    if (from >= obj.end) return 0;
-    return workingDaysBetween(from, obj.end, holidays);
-  }
 
   Object.defineProperty(__x, "evaluateLink", { get: () => evaluateLink, enumerable: true });
   Object.defineProperty(__x, "linkViolations", { get: () => linkViolations, enumerable: true });
@@ -10183,8 +9802,6 @@ __mods["core/analysis.js"] = function (__x, __req) {
   Object.defineProperty(__x, "compareBaseline", { get: () => compareBaseline, enumerable: true });
   Object.defineProperty(__x, "objectHealth", { get: () => objectHealth, enumerable: true });
   Object.defineProperty(__x, "projectHealth", { get: () => projectHealth, enumerable: true });
-  Object.defineProperty(__x, "slipByLane", { get: () => slipByLane, enumerable: true });
-  Object.defineProperty(__x, "workingDaysRemaining", { get: () => workingDaysRemaining, enumerable: true });
 };
 
 // ════════════════════════════════════════════════════════════════════════
@@ -10206,7 +9823,7 @@ __mods["timeline/viewport.js"] = function (__x, __req) {
 
   const { clamp } = __req("core/util.js");
   const { emit, EV } = __req("core/events.js");
-  const { MS_DAY, SCALES, startOfDay } = __req("core/dates.js");
+  const { MS_DAY, SCALES } = __req("core/dates.js");
 
   /** Zoom bounds: ~28 years across a 1600px window, down to ~6 days. */
   const MIN_PX_PER_DAY = 0.16;
@@ -10403,12 +10020,6 @@ __mods["timeline/viewport.js"] = function (__x, __req) {
     return { from: originMs - pad, to: endMs() + pad };
   }
 
-  /** True when `ms` currently falls inside the viewport. */
-  function isVisible(ms, overscanPx = 0) {
-    const { from, to } = visibleRange(overscanPx);
-    return ms >= from && ms <= to;
-  }
-
   /** True when a time range intersects the viewport. */
   function rangeVisible(startMs, stopMs, overscanPx = 240) {
     const { from, to } = visibleRange(overscanPx);
@@ -10429,11 +10040,6 @@ __mods["timeline/viewport.js"] = function (__x, __req) {
     return { scale: scale.label, span, pxPerDay: pxPerDay.toFixed(2) };
   }
 
-  /** Snap the origin to a whole day so gridlines land on exact pixels. */
-  function alignOriginToDay() {
-    originMs = startOfDay(originMs);
-    publish('align');
-  }
 
   Object.defineProperty(__x, "MIN_PX_PER_DAY", { get: () => MIN_PX_PER_DAY, enumerable: true });
   Object.defineProperty(__x, "MAX_PX_PER_DAY", { get: () => MAX_PX_PER_DAY, enumerable: true });
@@ -10462,10 +10068,8 @@ __mods["timeline/viewport.js"] = function (__x, __req) {
   Object.defineProperty(__x, "currentScale", { get: () => currentScale, enumerable: true });
   Object.defineProperty(__x, "headerScale", { get: () => headerScale, enumerable: true });
   Object.defineProperty(__x, "visibleRange", { get: () => visibleRange, enumerable: true });
-  Object.defineProperty(__x, "isVisible", { get: () => isVisible, enumerable: true });
   Object.defineProperty(__x, "rangeVisible", { get: () => rangeVisible, enumerable: true });
   Object.defineProperty(__x, "describeZoom", { get: () => describeZoom, enumerable: true });
-  Object.defineProperty(__x, "alignOriginToDay", { get: () => alignOriginToDay, enumerable: true });
 };
 
 // ════════════════════════════════════════════════════════════════════════
@@ -10484,7 +10088,7 @@ __mods["core/query.js"] = function (__x, __req) {
 
   const { fold, stripHtml, truncate } = __req("core/util.js");
   const { toMs, MS_DAY } = __req("core/dates.js");
-  const { TYPES, listIds, statusOf, subsystemOf } = __req("core/model.js");
+  const { TYPES, statusOf, subsystemOf } = __req("core/model.js");
 
   /**
    * Build a predicate from the active filter set.
@@ -10731,17 +10335,6 @@ __mods["core/query.js"] = function (__x, __req) {
     return Array.from(counts, ([value, count]) => ({ value, count })).sort((a, b) => b.count - a.count || String(a.value).localeCompare(String(b.value)));
   }
 
-  /** Status ids actually present in the document, in canonical order. */
-  function usedStatuses(doc) {
-    const present = new Set(doc.objects.map((o) => o.status));
-    return listIds('status').filter((id) => present.has(id));
-  }
-
-  /** Type ids actually present in the document, in registry order. */
-  function usedTypes(doc) {
-    const present = new Set(doc.objects.map((o) => o.type));
-    return Object.keys(TYPES).filter((id) => present.has(id));
-  }
 
   Object.defineProperty(__x, "filterPredicate", { get: () => filterPredicate, enumerable: true });
   Object.defineProperty(__x, "dateWindowPredicate", { get: () => dateWindowPredicate, enumerable: true });
@@ -10750,8 +10343,6 @@ __mods["core/query.js"] = function (__x, __req) {
   Object.defineProperty(__x, "search", { get: () => search, enumerable: true });
   Object.defineProperty(__x, "summarise", { get: () => summarise, enumerable: true });
   Object.defineProperty(__x, "facet", { get: () => facet, enumerable: true });
-  Object.defineProperty(__x, "usedStatuses", { get: () => usedStatuses, enumerable: true });
-  Object.defineProperty(__x, "usedTypes", { get: () => usedTypes, enumerable: true });
 };
 
 // ════════════════════════════════════════════════════════════════════════
@@ -10841,7 +10432,7 @@ __mods["timeline/text.js"] = function (__x, __req) {
 
   /** Advance width of `text` in pixels. */
   function textWidth(text, font) {
-    const key = `${font} ${text}`;
+    const key = `${font}\u0000${text}`;
     const hit = widthCache.get(key);
     if (hit !== undefined) return hit;
 
@@ -10866,7 +10457,7 @@ __mods["timeline/text.js"] = function (__x, __req) {
   function wrapText(text, maxWidth, font, { lineHeight = null, maxLines = 0 } = {}) {
     const source = String(text || '').trim();
     const limit = Math.max(12, maxWidth);
-    const key = `${font} ${Math.round(limit)} ${maxLines} ${source}`;
+    const key = `${font}\u0000${Math.round(limit)}\u0000${maxLines}\u0000${source}`;
 
     const hit = wrapCache.get(key);
     if (hit) return hit;
@@ -10951,10 +10542,6 @@ __mods["timeline/text.js"] = function (__x, __req) {
     return { width: Math.max(minWidth, Math.ceil(wrapped.width)), lines: wrapped.lines.length };
   }
 
-  /** Total height a wrapped block occupies. */
-  function blockHeight(lineCount, lineHeight) {
-    return Math.max(1, lineCount) * lineHeight;
-  }
 
   Object.defineProperty(__x, "uiFontFamily", { get: () => uiFontFamily, enumerable: true });
   Object.defineProperty(__x, "monoFontFamily", { get: () => monoFontFamily, enumerable: true });
@@ -10963,7 +10550,6 @@ __mods["timeline/text.js"] = function (__x, __req) {
   Object.defineProperty(__x, "textWidth", { get: () => textWidth, enumerable: true });
   Object.defineProperty(__x, "wrapText", { get: () => wrapText, enumerable: true });
   Object.defineProperty(__x, "fitWidth", { get: () => fitWidth, enumerable: true });
-  Object.defineProperty(__x, "blockHeight", { get: () => blockHeight, enumerable: true });
 };
 
 // ════════════════════════════════════════════════════════════════════════
@@ -10999,7 +10585,7 @@ __mods["timeline/layout.js"] = function (__x, __req) {
   const { TYPES, baselineSnapshot, delayReason, visibleNote, actualRange, comparedRange } = __req("core/model.js");
 
 
-  const { getDoc, orderedLanes, getLane, activeBaseline } = __req("core/store.js");
+  const { getDoc, orderedLanes, activeBaseline } = __req("core/store.js");
   const { msToPx, durationToPx, pxToDuration, visibleRange, rangeVisible } = __req("timeline/viewport.js");
   const { fontString, textWidth, wrapText, fitWidth } = __req("timeline/text.js");
 
@@ -11985,16 +11571,6 @@ __mods["timeline/layout.js"] = function (__x, __req) {
     return geometry.lanes[geometry.lanes.length - 1] || null;
   }
 
-  /** Which packed row within a lane a canvas y coordinate falls on. */
-  function rowAtY(laneEntry, y) {
-    if (!laneEntry || !laneEntry.rowTops.length) return 0;
-    const offset = y - laneEntry.contentY;
-    for (let r = laneEntry.rowTops.length - 1; r >= 0; r--) {
-      if (offset >= laneEntry.rowTops[r]) return r;
-    }
-    return 0;
-  }
-
   /**
    * Hit-test: the topmost object rectangle containing a canvas point.
    * Iterates back to front so the object drawn last wins, matching what the
@@ -12040,31 +11616,6 @@ __mods["timeline/layout.js"] = function (__x, __req) {
     return geometry.totalHeight + 80;
   }
 
-  /** Lane entry for an object id, or null. */
-  function laneEntryFor(geometry, laneId) {
-    return geometry.byId.get(laneId) || null;
-  }
-
-  /** Convenience: the lane record an object belongs to. */
-  function laneOf(obj) {
-    return getLane(obj.lane);
-  }
-
-  /** Vertical geometry only — used where object placement is irrelevant. */
-  function laneLayout() {
-    const lanes = orderedLanes(false);
-    const out = [];
-    const byId = new Map();
-    let y = 0;
-    for (const lane of lanes) {
-      const height = lane.collapsed ? 26 : lane.height;
-      const entry = { lane, id: lane.id, y, height, contentY: y + LANE_PAD, contentH: Math.max(10, height - LANE_PAD * 2) };
-      out.push(entry);
-      byId.set(lane.id, entry);
-      y += height;
-    }
-    return { lanes: out, totalHeight: y, byId };
-  }
 
   Object.defineProperty(__x, "ROW_HEIGHT", { get: () => ROW_HEIGHT, enumerable: true });
   Object.defineProperty(__x, "measureLabel", { get: () => measureLabel, enumerable: true });
@@ -12072,14 +11623,10 @@ __mods["timeline/layout.js"] = function (__x, __req) {
   Object.defineProperty(__x, "computeLayout", { get: () => computeLayout, enumerable: true });
   Object.defineProperty(__x, "objectRect", { get: () => objectRect, enumerable: true });
   Object.defineProperty(__x, "laneAtY", { get: () => laneAtY, enumerable: true });
-  Object.defineProperty(__x, "rowAtY", { get: () => rowAtY, enumerable: true });
   Object.defineProperty(__x, "hitTest", { get: () => hitTest, enumerable: true });
   Object.defineProperty(__x, "hitTestBox", { get: () => hitTestBox, enumerable: true });
   Object.defineProperty(__x, "anchorPoint", { get: () => anchorPoint, enumerable: true });
   Object.defineProperty(__x, "stageHeight", { get: () => stageHeight, enumerable: true });
-  Object.defineProperty(__x, "laneEntryFor", { get: () => laneEntryFor, enumerable: true });
-  Object.defineProperty(__x, "laneOf", { get: () => laneOf, enumerable: true });
-  Object.defineProperty(__x, "laneLayout", { get: () => laneLayout, enumerable: true });
 };
 
 // ════════════════════════════════════════════════════════════════════════
@@ -12552,20 +12099,8 @@ __mods["ui/icons.js"] = function (__x, __req) {
     );
   }
 
-  /** Render an icon straight to a detached SVG element. */
-  function iconEl(name, opts = {}) {
-    const wrapper = document.createElement('span');
-    wrapper.innerHTML = icon(name, opts);
-    return wrapper.firstElementChild;
-  }
-
   function hasIcon(name) {
     return Object.prototype.hasOwnProperty.call(ICONS, name);
-  }
-
-  /** Raw path markup — used by the SVG and PDF exporters. */
-  function iconPath(name) {
-    return ICONS[name] ? ICONS[name][0] : '';
   }
 
   /**
@@ -12582,24 +12117,11 @@ __mods["ui/icons.js"] = function (__x, __req) {
     });
   }
 
-  /** Icons grouped by category, for the browse view of the picker. */
-  function iconCategories() {
-    const groups = new Map();
-    for (const name of ICON_NAMES) {
-      const category = ICONS[name][2] || 'Other';
-      if (!groups.has(category)) groups.set(category, []);
-      groups.get(category).push(name);
-    }
-    return Array.from(groups, ([name, icons]) => ({ name, icons }));
-  }
 
   Object.defineProperty(__x, "ICON_NAMES", { get: () => ICON_NAMES, enumerable: true });
   Object.defineProperty(__x, "icon", { get: () => icon, enumerable: true });
-  Object.defineProperty(__x, "iconEl", { get: () => iconEl, enumerable: true });
   Object.defineProperty(__x, "hasIcon", { get: () => hasIcon, enumerable: true });
-  Object.defineProperty(__x, "iconPath", { get: () => iconPath, enumerable: true });
   Object.defineProperty(__x, "searchIcons", { get: () => searchIcons, enumerable: true });
-  Object.defineProperty(__x, "iconCategories", { get: () => iconCategories, enumerable: true });
 };
 
 // ════════════════════════════════════════════════════════════════════════
@@ -15223,21 +14745,11 @@ __mods["timeline/interactions.js"] = function (__x, __req) {
     renderer.requestRender();
   }
 
-  /** True while a gesture is in flight — the renderer avoids heavy work then. */
-  function isDragging() {
-    return gesture !== null;
-  }
-
-  function currentGesture() {
-    return gesture;
-  }
 
   Object.defineProperty(__x, "attach", { get: () => attach, enumerable: true });
   Object.defineProperty(__x, "stepBySnap", { get: () => stepBySnap, enumerable: true });
   Object.defineProperty(__x, "nudgeSelection", { get: () => nudgeSelection, enumerable: true });
   Object.defineProperty(__x, "stretchSelection", { get: () => stretchSelection, enumerable: true });
-  Object.defineProperty(__x, "isDragging", { get: () => isDragging, enumerable: true });
-  Object.defineProperty(__x, "currentGesture", { get: () => currentGesture, enumerable: true });
 };
 
 // ════════════════════════════════════════════════════════════════════════
@@ -15249,8 +14761,9 @@ __mods["ui/theme.js"] = function (__x, __req) {
    *
    * The theme is a device preference, not project data: the same plan opened on
    * a projector should be able to use the Presentation palette without changing
-   * the document. It is mirrored into the document's settings so exports can
-   * reproduce the look, but the local preference always wins on load.
+   * the document. It is mirrored into the document's settings, quietly — never an
+   * undoable edit (`core/store.js`) — so a computer with no preference of its own
+   * opens the plan the way it was last seen; the local preference always wins.
    *
    * Imports: events, storage, store, renderer.
    */
@@ -15317,24 +14830,11 @@ __mods["ui/theme.js"] = function (__x, __req) {
     paint();
   }
 
-  /** Step to the next theme in the list — bound to a toolbar button. */
-  function cycleTheme() {
-    const i = THEMES.findIndex((t) => t.id === current);
-    applyTheme(THEMES[(i + 1) % THEMES.length].id);
-  }
-
-  /** True for themes whose surfaces are light — used by exporters. */
-  function isLightTheme(id = current) {
-    const drawn = palette(id);
-    return drawn === 'light' || drawn === 'presentation';
-  }
 
   Object.defineProperty(__x, "THEMES", { get: () => THEMES, enumerable: true });
   Object.defineProperty(__x, "initTheme", { get: () => initTheme, enumerable: true });
   Object.defineProperty(__x, "getTheme", { get: () => getTheme, enumerable: true });
   Object.defineProperty(__x, "applyTheme", { get: () => applyTheme, enumerable: true });
-  Object.defineProperty(__x, "cycleTheme", { get: () => cycleTheme, enumerable: true });
-  Object.defineProperty(__x, "isLightTheme", { get: () => isLightTheme, enumerable: true });
 };
 
 // ════════════════════════════════════════════════════════════════════════
@@ -17749,11 +17249,6 @@ __mods["core/rc.js"] = function (__x, __req) {
   /** Slim the grids of superseded editor readings past the keep period, and say how many. */
   const compactSnapshots = () => rpc('rc_compact_snapshots', {});
 
-  /** One reading's stored rows. */
-  function snapshotRows(snapshotId) {
-    return selectAll('rc_lookahead_rows', (q) => q.eq('snapshot_id', snapshotId).order('id'));
-  }
-
   function listSupportCodes({ includeRetired = false } = {}) {
     return select('rc_support_codes', (q) => (includeRetired ? q.order('sort').order('code') : q.eq('active', true).order('sort').order('code')));
   }
@@ -17836,13 +17331,6 @@ __mods["core/rc.js"] = function (__x, __req) {
   function listLeave(fromISO, toISO) {
     return select('rc_leave', (q) =>
       q.lte('start_date', toISO).gte('end_date', fromISO).neq('status', 'cancelled'));
-  }
-
-  /** Look-ahead rows by id. */
-  async function lookaheadRowsByIds(ids) {
-    const unique = [...new Set((ids || []).filter(Boolean))];
-    if (!unique.length) return [];
-    return select('rc_lookahead_rows', (q) => q.in('id', unique), { columns: 'id,raw_label,raw_location,snapshot_id,sheet_row' });
   }
 
   function listIngestRuns({ limit = 100 } = {}) {
@@ -17994,11 +17482,7 @@ __mods["core/rc.js"] = function (__x, __req) {
     insert('rc_location_alias', [{ location_id: locationId, alias }]).then((r) => r[0]);
   const addPersonAlias = (personId, alias) =>
     insert('rc_person_alias', [{ person_id: personId, alias }]).then((r) => r[0]);
-  const addCategory = (row) => insert('rc_categories', [row]).then((r) => r[0]);
-  const updateCategory = (id, patch) => update('rc_categories', id, patch);
   const addParty = (name) => insert('rc_parties', [{ name }]).then((r) => r[0]);
-  const addLeaveKind = (row) => insert('rc_leave_kinds', [row]).then((r) => r[0]);
-  const updateLeaveKind = (id, patch) => update('rc_leave_kinds', id, patch);
 
   /**
    * Map colours, or re-map them — an upsert on `(valid_from, argb)`, because
@@ -18011,7 +17495,6 @@ __mods["core/rc.js"] = function (__x, __req) {
   /** Delete a reference row where nothing has been recorded against it; retire it otherwise. */
   const deletePerson = (id) => rpc('rc_delete_person', { p_person: id });
   const deleteLocation = (id) => rpc('rc_delete_location', { p_location: id });
-  const deleteCategory = (id) => rpc('rc_delete_category', { p_category: id });
   const deleteLegend = (id) => rpc('rc_delete_legend', { p_entry: id });
 
   /** Write a setting — an upsert, because the first time there is no row to update. */
@@ -18167,7 +17650,6 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "listLaEditsBetween", { get: () => listLaEditsBetween, enumerable: true });
   Object.defineProperty(__x, "listLaEditsForRow", { get: () => listLaEditsForRow, enumerable: true });
   Object.defineProperty(__x, "compactSnapshots", { get: () => compactSnapshots, enumerable: true });
-  Object.defineProperty(__x, "snapshotRows", { get: () => snapshotRows, enumerable: true });
   Object.defineProperty(__x, "listSupportCodes", { get: () => listSupportCodes, enumerable: true });
   Object.defineProperty(__x, "addSupportCode", { get: () => addSupportCode, enumerable: true });
   Object.defineProperty(__x, "updateSupportCode", { get: () => updateSupportCode, enumerable: true });
@@ -18181,7 +17663,6 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "listSettings", { get: () => listSettings, enumerable: true });
   Object.defineProperty(__x, "listLeaveKinds", { get: () => listLeaveKinds, enumerable: true });
   Object.defineProperty(__x, "listLeave", { get: () => listLeave, enumerable: true });
-  Object.defineProperty(__x, "lookaheadRowsByIds", { get: () => lookaheadRowsByIds, enumerable: true });
   Object.defineProperty(__x, "listIngestRuns", { get: () => listIngestRuns, enumerable: true });
   Object.defineProperty(__x, "listSnapshotMeta", { get: () => listSnapshotMeta, enumerable: true });
   Object.defineProperty(__x, "snapshotMetaByIds", { get: () => snapshotMetaByIds, enumerable: true });
@@ -18205,16 +17686,11 @@ __mods["core/rc.js"] = function (__x, __req) {
   Object.defineProperty(__x, "updateLocation", { get: () => updateLocation, enumerable: true });
   Object.defineProperty(__x, "addLocationAlias", { get: () => addLocationAlias, enumerable: true });
   Object.defineProperty(__x, "addPersonAlias", { get: () => addPersonAlias, enumerable: true });
-  Object.defineProperty(__x, "addCategory", { get: () => addCategory, enumerable: true });
-  Object.defineProperty(__x, "updateCategory", { get: () => updateCategory, enumerable: true });
   Object.defineProperty(__x, "addParty", { get: () => addParty, enumerable: true });
-  Object.defineProperty(__x, "addLeaveKind", { get: () => addLeaveKind, enumerable: true });
-  Object.defineProperty(__x, "updateLeaveKind", { get: () => updateLeaveKind, enumerable: true });
   Object.defineProperty(__x, "addLegend", { get: () => addLegend, enumerable: true });
   Object.defineProperty(__x, "updateLegend", { get: () => updateLegend, enumerable: true });
   Object.defineProperty(__x, "deletePerson", { get: () => deletePerson, enumerable: true });
   Object.defineProperty(__x, "deleteLocation", { get: () => deleteLocation, enumerable: true });
-  Object.defineProperty(__x, "deleteCategory", { get: () => deleteCategory, enumerable: true });
   Object.defineProperty(__x, "deleteLegend", { get: () => deleteLegend, enumerable: true });
   Object.defineProperty(__x, "setSetting", { get: () => setSetting, enumerable: true });
   Object.defineProperty(__x, "addLeave", { get: () => addLeave, enumerable: true });
@@ -18774,13 +18250,6 @@ __mods["ui/components.js"] = function (__x, __req) {
     return select;
   }
 
-  /** @param {{ value?: string, onChange?: Function }} options */
-  function colorInput({ value = '#5b93f5', onChange }) {
-    const input = el('input', { class: 'cx-color', type: 'color', value: value || '#5b93f5' });
-    if (onChange) input.addEventListener('input', () => onChange(input.value));
-    return input;
-  }
-
   /** @param {{ label: any, checked?: boolean, onChange?: Function }} options */
   function checkbox({ label, checked = false, onChange }) {
     const input = el('input', { type: 'checkbox' });
@@ -19093,13 +18562,6 @@ __mods["ui/components.js"] = function (__x, __req) {
     ]);
   }
 
-  /** Render a tag chip. */
-  function tagChip(label, color) {
-    return el('span', { class: 'cx-tag', style: color ? { color, background: 'transparent', boxShadow: `inset 0 0 0 1px ${color}55` } : {} }, [
-      el('span', { text: label }),
-    ]);
-  }
-
   /** Unique DOM id helper for label/control pairs. */
   function domId(prefix = 'f') {
     return uid(prefix).replace(/[^\w-]/g, '');
@@ -19122,7 +18584,6 @@ __mods["ui/components.js"] = function (__x, __req) {
   Object.defineProperty(__x, "textInput", { get: () => textInput, enumerable: true });
   Object.defineProperty(__x, "numberInput", { get: () => numberInput, enumerable: true });
   Object.defineProperty(__x, "selectInput", { get: () => selectInput, enumerable: true });
-  Object.defineProperty(__x, "colorInput", { get: () => colorInput, enumerable: true });
   Object.defineProperty(__x, "checkbox", { get: () => checkbox, enumerable: true });
   Object.defineProperty(__x, "toggle", { get: () => toggle, enumerable: true });
   Object.defineProperty(__x, "rangeInput", { get: () => rangeInput, enumerable: true });
@@ -19138,7 +18599,6 @@ __mods["ui/components.js"] = function (__x, __req) {
   Object.defineProperty(__x, "colorControl", { get: () => colorControl, enumerable: true });
   Object.defineProperty(__x, "skeleton", { get: () => skeleton, enumerable: true });
   Object.defineProperty(__x, "progressBar", { get: () => progressBar, enumerable: true });
-  Object.defineProperty(__x, "tagChip", { get: () => tagChip, enumerable: true });
   Object.defineProperty(__x, "domId", { get: () => domId, enumerable: true });
 };
 
@@ -20532,7 +19992,6 @@ __mods["ui/commands.js"] = function (__x, __req) {
   const store = __req("core/store.js");
   const { saveNow, makeBackup, openFolderPlan, createFolderPlan, leaveFolder } = __req("core/storage.js");
   const filestore = __req("core/filestore.js");
-  const access = __req("core/access.js");
   const { linkViolations, resolutionFor } = __req("core/analysis.js");
   const viewport = __req("timeline/viewport.js");
   const renderer = __req("timeline/renderer.js");
@@ -21285,15 +20744,6 @@ __mods["ui/commands.js"] = function (__x, __req) {
    * to reload rather than overwriting.
    */
   async function takeOverEditing() {
-    /* Except by somebody who may not edit the plan at all. The pen decides who
-       goes next among people who can write, and this account never can — so
-       taking it would produce a session that looks editable and refuses the first
-       edit. Said plainly rather than refused silently. */
-    if (access.planLocked()) {
-      toast({ tone: 'info', title: 'The plan is read-only for your account', message: access.lockReason() });
-      return false;
-    }
-
     const status = await filestore.lockStatus();
 
     if (status.live) {
@@ -21348,11 +20798,6 @@ __mods["ui/commands.js"] = function (__x, __req) {
    */
   async function announceStartupPen(pen) {
     if (!pen || pen.mine) return null;
-    /* An account that may not edit the plan is read-only for a reason that has
-       nothing to do with the pen, and saying "Dana has it open, take over?" would
-       be offering something that cannot happen and naming the wrong cause. Their
-       own reason is on the Shared folder pane and in the status bar. */
-    if (access.planLocked()) return 'viewer';
 
     if (!pen.live) {
       if (pen.free && pen.holder) {
@@ -21748,7 +21193,7 @@ __mods["ui/p6.js"] = function (__x, __req) {
         parsed = null;
         clear(preview);
         status.textContent = '';
-        preview.appendChild(el('div', { class: 'cx-gate-msg bad', text: `Could not read the file: ${err.message}` }));
+        preview.appendChild(el('div', { class: 'cx-msg bad', text: `Could not read the file: ${err.message}` }));
       }
     }
 
@@ -21758,7 +21203,7 @@ __mods["ui/p6.js"] = function (__x, __req) {
       if (!parsed) return;
 
       for (const warning of parsed.warnings) {
-        preview.appendChild(el('div', { class: 'cx-gate-msg bad', style: { marginBottom: '8px' }, text: warning }));
+        preview.appendChild(el('div', { class: 'cx-msg bad', style: { marginBottom: '8px' }, text: warning }));
       }
 
       if (!parsed.activities.length) return;
@@ -21784,7 +21229,7 @@ __mods["ui/p6.js"] = function (__x, __req) {
 
       if (plan.placedAffected) {
         preview.appendChild(
-          el('div', { class: 'cx-gate-msg', style: { borderColor: 'var(--warn)', background: 'color-mix(in srgb, var(--warn) 12%, transparent)', marginTop: '9px' },
+          el('div', { class: 'cx-msg', style: { borderColor: 'var(--warn)', background: 'color-mix(in srgb, var(--warn) 12%, transparent)', marginTop: '9px' },
             text: `${plan.placedAffected} of the activities that moved are on your timeline. After importing you can choose which of your bars follow the new dates.` })
         );
       }
@@ -21792,7 +21237,7 @@ __mods["ui/p6.js"] = function (__x, __req) {
       const absentPlaced = plan.absent.filter((a) => a.placed);
       if (absentPlaced.length) {
         preview.appendChild(
-          el('div', { class: 'cx-gate-msg bad', style: { marginTop: '9px' },
+          el('div', { class: 'cx-msg bad', style: { marginTop: '9px' },
             text: `${absentPlaced.length} activity(s) on your timeline are not in this file — they will be marked, not removed.` })
         );
       }
@@ -23047,7 +22492,7 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
              look-ahead that could disagree with the first. */
           message: calendarAvailable()
             ? 'Press Update from the calendar. Each run of painted days becomes a suggestion, and nothing goes on the timeline until you place it.'
-            : 'The look-ahead is read from the resource calendar. Open Calendar and sign in, then come back and press Update from the calendar.',
+            : 'The look-ahead is read from the resource calendar. Open Calendar on the shared folder, then come back and press Update from the calendar.',
         })
       );
       return;
@@ -23201,7 +22646,7 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
    * list's metadata, never the grid, so opening the pane costs one small read.
    */
   function calendarNotice(register) {
-    const note = el('div', { class: 'cx-gate-msg la-calendar-notice', hidden: true, style: { marginBottom: '9px' } });
+    const note = el('div', { class: 'cx-msg la-calendar-notice', hidden: true, style: { marginBottom: '9px' } });
     const since = register.imported?.source === 'calendar' ? register.imported.snapshotAt : null;
     rc.listSnapshotMeta({ limit: 1 })
       .then((rows) => {
@@ -24810,11 +24255,9 @@ __mods["io/scene.js"] = function (__x, __req) {
     })).sort((a, b) => b.count - a.count);
   }
 
-  const SCENE_METRICS = M;
 
   Object.defineProperty(__x, "resolvePalette", { get: () => resolvePalette, enumerable: true });
   Object.defineProperty(__x, "buildScene", { get: () => buildScene, enumerable: true });
-  Object.defineProperty(__x, "SCENE_METRICS", { get: () => SCENE_METRICS, enumerable: true });
 };
 
 // ════════════════════════════════════════════════════════════════════════
@@ -26690,7 +26133,7 @@ __mods["ui/notes.js"] = function (__x, __req) {
    * Imports: util, icons, components.
    */
 
-  const { el, debounce, stripHtml, readFileAsDataURL, pickFiles, bytes } = __req("core/util.js");
+  const { el, debounce, readFileAsDataURL, pickFiles, bytes } = __req("core/util.js");
   const { icon } = __req("ui/icons.js");
   const { openModal, toast, promptDialog } = __req("ui/components.js");
 
@@ -26772,12 +26215,6 @@ __mods["ui/notes.js"] = function (__x, __req) {
 
     walk(body);
     return body.innerHTML;
-  }
-
-  /** Plain-text preview of a note, for tooltips and search results. */
-  function notePreview(html, max = 220) {
-    const text = stripHtml(html);
-    return text.length > max ? text.slice(0, max - 1) + '…' : text;
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
@@ -26995,7 +26432,6 @@ __mods["ui/notes.js"] = function (__x, __req) {
   }
 
   Object.defineProperty(__x, "sanitiseHtml", { get: () => sanitiseHtml, enumerable: true });
-  Object.defineProperty(__x, "notePreview", { get: () => notePreview, enumerable: true });
   Object.defineProperty(__x, "noteEditor", { get: () => noteEditor, enumerable: true });
   Object.defineProperty(__x, "openNoteEditor", { get: () => openNoteEditor, enumerable: true });
   Object.defineProperty(__x, "renderNote", { get: () => renderNote, enumerable: true });
@@ -27830,14 +27266,13 @@ __mods["ui/pane_plan.js"] = function (__x, __req) {
     root.appendChild(el('div', { class: 'cx-hint', style: { marginBottom: '10px' }, text: 'Pick a tool, then click on the timeline to place it. Double-clicking empty canvas always creates an activity.' }));
 
     for (const group of typeGroups()) {
-      const grid = el('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '5px' } });
+      const grid = el('div', { class: 'palette-grid' });
       for (const type of group.items) {
         grid.appendChild(
           el('button', {
             class: 'cx-btn mini' + (store.getTool() === type.id ? ' active' : ''),
-            style: { justifyContent: 'flex-start' },
             title: `${type.label} — click the timeline to place`,
-            html: icon(type.icon, { size: 13 }) + `<span style="overflow:hidden;text-overflow:ellipsis">${type.label}</span>`,
+            html: icon(type.icon, { size: 13 }) + `<span>${type.label}</span>`,
             onClick: () => {
               store.setTool(type.id);
               refreshPane();
@@ -28656,7 +28091,6 @@ __mods["ui/pane_io.js"] = function (__x, __req) {
   const store = __req("core/store.js");
   const { makeBackup } = __req("core/storage.js");
   const filestore = __req("core/filestore.js");
-  const access = __req("core/access.js");
   const renderer = __req("timeline/renderer.js");
   const { icon } = __req("ui/icons.js");
   const { field, textInput, selectInput, toggle, segmented, section, toast, openModal, contextMenu } = __req("ui/components.js");
@@ -28720,13 +28154,7 @@ __mods["ui/pane_io.js"] = function (__x, __req) {
           ]),
         ])
       );
-      /* The pen is a turn among people who can write. An account the calendar
-         says may not edit the plan has no turn to take, so the button is not
-         offered and the reason is said instead — `filestore.takeOver()` would
-         refuse it anyway, and a button that always refuses is worse than none. */
-      if (!editing && access.planLocked()) {
-        rows.push(el('div', { class: 'cx-hint', text: access.lockReason() }));
-      } else if (!editing) {
+      if (!editing) {
         rows.push(wideBtn('Take over editing', 'refresh', () => cmd.takeOverEditing()));
       }
       rows.push(
@@ -30195,7 +29623,9 @@ __mods["ui/shell.js"] = function (__x, __req) {
       el('div', { class: 'sidenav-footer' }, [
         el('div', { class: 'sidenav-project-tag', dataset: { projectTag: '1' }, text: doc.project || doc.client || fallbackTag() }),
         el('button', {
-          class: 'cx-btn mini',
+          class: 'cx-btn mini sidenav-present',
+          title: 'Presentation mode',
+          'aria-label': 'Present',
           html: icon('maximize', { size: 12 }) + '<span>Present</span>',
           onClick: () => emit(EV.PRESENT_MODE, { on: !document.body.classList.contains('presenting') }),
         }),
@@ -30215,6 +29645,10 @@ __mods["ui/shell.js"] = function (__x, __req) {
     const button = (id, label, iconName) => el('button', {
       class: 'ws-btn',
       type: 'button',
+      dataset: { workspace: id },
+      // The narrow sidebar shows the icon alone; the name stays on the button.
+      title: label,
+      'aria-label': label,
       'aria-pressed': String(workspace.current() === id),
       html: icon(iconName, { size: 13 }) + `<span>${label}</span>`,
       onClick: () => workspace.show(id),
@@ -30742,16 +30176,14 @@ __mods["ui/shell.js"] = function (__x, __req) {
     on(EV.DOC_REPLACED, refresh);
     on(EV.HISTORY_CHANGED, refresh);
 
-    on(EV.ACCESS_CHANGED, refresh);
-    // The switch is two buttons; repainting the sidebar to move a highlight
-    // would throw away the pane list and its scroll position for nothing.
     on(EV.CALENDAR_FAILED, ({ message }) => {
       toast({ tone: 'bad', title: 'The calendar did not open', message, timeout: 10000 });
     });
+    // The switch is two buttons; repainting the sidebar to move a highlight
+    // would throw away the pane list and its scroll position for nothing.
     on(EV.WORKSPACE_CHANGED, ({ workspace: which }) => {
       for (const btn of dom.sidenav.querySelectorAll('.ws-btn')) {
-        const label = btn.querySelector('span')?.textContent.toLowerCase();
-        btn.setAttribute('aria-pressed', String(label === which));
+        btn.setAttribute('aria-pressed', String(btn.dataset.workspace === which));
       }
     });
     on(EV.FILE_STATE, () => refreshStatus());
@@ -30786,17 +30218,10 @@ __mods["ui/shell.js"] = function (__x, __req) {
     });
   }
 
-  /** Public refresh hook for modules that change shell-visible state. */
-  function refreshShell() {
-    refreshToolbar();
-    refreshStatus();
-    updateNav();
-  }
 
   Object.defineProperty(__x, "buildShell", { get: () => buildShell, enumerable: true });
   Object.defineProperty(__x, "fitAll", { get: () => fitAll, enumerable: true });
   Object.defineProperty(__x, "goToToday", { get: () => goToToday, enumerable: true });
-  Object.defineProperty(__x, "refreshShell", { get: () => refreshShell, enumerable: true });
 };
 
 // ════════════════════════════════════════════════════════════════════════
@@ -31039,6 +30464,13 @@ __mods["ui/inspector.js"] = function (__x, __req) {
       case 'ontrack': return `Tracking to plan (${health.expected}% expected, ${health.actual}% reported).`;
       case 'done': return 'Complete.';
       case 'late': return `Planned date passed ${fmtDuration(health.days || 0)} ago.`;
+      /* Before its start date — but the work may have begun early, and saying
+         "not started" over 45% done contradicted the chips just above. */
+      case 'future':
+        if (!health.days) return 'Due today.';
+        if (health.label === 'Upcoming') return `Due in ${fmtDuration(health.days)}.`;
+        return `Planned to start in ${fmtDuration(health.days)}`
+          + (health.actual > 0 ? ` — ${health.actual}% already reported.` : '.');
       default: return 'Not started yet.';
     }
   }
@@ -31166,7 +30598,7 @@ __mods["ui/inspector.js"] = function (__x, __req) {
             onChange: (v) => set(obj.id, { end: endForDuration(obj.start, v) }, 'Change duration'),
           })),
           field('Remaining', el('div', {
-            class: 'cx-input mini',
+            class: 'cx-input',
             style: { display: 'flex', alignItems: 'center', color: 'var(--text-muted)', cursor: 'default' },
             text: fmtDuration(remainingDays(obj)),
           })),
@@ -32337,13 +31769,8 @@ __mods["ui/minimap.js"] = function (__x, __req) {
     renderer.requestRender();
   }
 
-  /** Force a redraw — called after a resize. */
-  function refreshMinimap() {
-    scheduleDraw();
-  }
 
   Object.defineProperty(__x, "buildMinimap", { get: () => buildMinimap, enumerable: true });
-  Object.defineProperty(__x, "refreshMinimap", { get: () => refreshMinimap, enumerable: true });
 };
 
 // ════════════════════════════════════════════════════════════════════════
@@ -32865,7 +32292,7 @@ __mods["ui/shortcuts.js"] = function (__x, __req) {
    * Imports: util, events, store, renderer, interactions, commands, components, panels.
    */
 
-  const { hasMod, isTyping, IS_MAC } = __req("core/util.js");
+  const { hasMod, isTyping } = __req("core/util.js");
   const { emit, EV } = __req("core/events.js");
   const store = __req("core/store.js");
   const renderer = __req("timeline/renderer.js");
@@ -33062,11 +32489,8 @@ __mods["ui/shortcuts.js"] = function (__x, __req) {
     }
   }
 
-  /** Human-readable modifier name for help text. */
-  const MOD_LABEL = IS_MAC ? '⌘' : 'Ctrl';
 
   Object.defineProperty(__x, "installShortcuts", { get: () => installShortcuts, enumerable: true });
-  Object.defineProperty(__x, "MOD_LABEL", { get: () => MOD_LABEL, enumerable: true });
 };
 
 // ════════════════════════════════════════════════════════════════════════
@@ -33082,32 +32506,24 @@ __mods["ui/access_mode.js"] = function (__x, __req) {
    * the top saying who has it and when they last saved, and the button that asks
    * them for it. It explains the state; it does not create it.
    *
-   * Imports: util, events, filestore, access, icons, components.
+   * Imports: util, events, filestore, icons, components.
    */
 
   const { el } = __req("core/util.js");
   const { on, EV } = __req("core/events.js");
   const filestore = __req("core/filestore.js");
-  const access = __req("core/access.js");
   const { icon } = __req("ui/icons.js");
   const { toast } = __req("ui/components.js");
 
   function installAccessMode() {
     const apply = () => {
-      /* Two things can make a session read-only, and the interface says the
-         same thing for both — only the reason differs, and only the reason
-         decides whether there is anything the reader can do about it. A
-         colleague holding the pen on the plan: wait, ask, or take it. And a
-         session that may not edit the plan at all, which outranks the pen —
-         there is nobody to ask, so the banner says why and offers nothing. */
-      const locked = access.planLocked();
-      const viewingFolder = !locked && filestore.isViewer();
-      const readOnly = locked || viewingFolder;
+      /* A colleague holding the pen on the plan is what makes a session
+         read-only: wait, ask, or take it. */
+      const readOnly = filestore.isViewer();
       document.body.classList.toggle('read-only', readOnly);
-      renderBanner(readOnly, viewingFolder ? filestore.state() : null);
+      renderBanner(readOnly, readOnly ? filestore.state() : null);
     };
 
-    on(EV.ACCESS_CHANGED, apply);
     on(EV.FILE_STATE, apply);
 
     // One notice per burst — a viewer holding an arrow key would otherwise
@@ -33120,9 +32536,7 @@ __mods["ui/access_mode.js"] = function (__x, __req) {
       toast({
         tone: 'warn',
         title: 'Read-only',
-        message: access.planLocked()
-          ? access.lockReason()
-          : 'A colleague has the pen on this plan. Ask for it, or take over editing in Import / export.',
+        message: 'A colleague has the pen on this plan. Ask for it, or take over editing in Import / export.',
       });
     });
 
@@ -33162,11 +32576,9 @@ __mods["ui/access_mode.js"] = function (__x, __req) {
     const idle = folder && Number.isFinite(folder.holderIdleMs)
       ? ` Last saved ${since(folder.holderIdleMs)}.`
       : '';
-    const message = access.planLocked()
-      ? `Read-only — ${access.lockReason()}`
-      : holder
-        ? `Read-only — ${holder} has this plan open.${idle}`
-        : 'Read-only — this plan cannot be edited here.';
+    const message = holder
+      ? `Read-only — ${holder} has this plan open.${idle}`
+      : 'Read-only — this plan cannot be edited here.';
 
     const kids = [
       el('span', { class: 'ro-icon', html: icon('eye', { size: 13 }) }),
@@ -33215,13 +32627,12 @@ __mods["ui/canvas_hint.js"] = function (__x, __req) {
    * objects were packed) rather than working out visibility for itself, so it
    * cannot disagree with what is on screen.
    *
-   * Imports: util, events, store, access, icons, commands, pane_util.
+   * Imports: util, events, store, icons, commands, pane_util.
    */
 
   const { el } = __req("core/util.js");
   const { on, EV } = __req("core/events.js");
   const store = __req("core/store.js");
-  const { planLocked } = __req("core/access.js");
   const { icon } = __req("ui/icons.js");
   const cmd = __req("ui/commands.js");
   const { goToPane } = __req("ui/pane_util.js");
@@ -33253,7 +32664,6 @@ __mods["ui/canvas_hint.js"] = function (__x, __req) {
       return;
     }
 
-    const locked = planLocked();
     const filters = store.getFilters();
     const hidden = doc.objects.filter((o) => o.hidden).length;
     const windowSet = Boolean(filters.from || filters.to);
@@ -33265,16 +32675,12 @@ __mods["ui/canvas_hint.js"] = function (__x, __req) {
     const actions = [];
 
     if (!doc.objects.length) {
-      key = `empty:${locked}:${doc.lanes.length}`;
+      key = `empty:${doc.lanes.length}`;
       title = 'An empty plan';
-      message = locked
-        ? 'Nothing has been added to this plan yet, and this account may only read it.'
-        : 'Add the first activity, or bring a plan in from a file or a P6 export.';
-      if (!locked) {
-        if (doc.lanes.length) actions.push(action('Add an activity', 'plus', () => cmd.createObject('activity'), true));
-        else actions.push(action('Add a lane', 'layers', () => cmd.addLane(), true));
-        actions.push(action('Import…', 'upload', () => goToPane('io')));
-      }
+      message = 'Add the first activity, or bring a plan in from a file or a P6 export.';
+      if (doc.lanes.length) actions.push(action('Add an activity', 'plus', () => cmd.createObject('activity'), true));
+      else actions.push(action('Add a lane', 'layers', () => cmd.addLane(), true));
+      actions.push(action('Import…', 'upload', () => goToPane('io')));
     } else {
       key = `hidden:${windowSet}:${hidden}:${filtering}`;
       title = 'Nothing in view';

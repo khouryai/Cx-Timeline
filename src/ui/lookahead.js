@@ -101,7 +101,7 @@ export function paneLookahead(root) {
            look-ahead that could disagree with the first. */
         message: calendarAvailable()
           ? 'Press Update from the calendar. Each run of painted days becomes a suggestion, and nothing goes on the timeline until you place it.'
-          : 'The look-ahead is read from the resource calendar. Open Calendar and sign in, then come back and press Update from the calendar.',
+          : 'The look-ahead is read from the resource calendar. Open Calendar on the shared folder, then come back and press Update from the calendar.',
       })
     );
     return;
@@ -255,7 +255,7 @@ export async function updateFromCalendar() {
  * list's metadata, never the grid, so opening the pane costs one small read.
  */
 function calendarNotice(register) {
-  const note = el('div', { class: 'cx-gate-msg la-calendar-notice', hidden: true, style: { marginBottom: '9px' } });
+  const note = el('div', { class: 'cx-msg la-calendar-notice', hidden: true, style: { marginBottom: '9px' } });
   const since = register.imported?.source === 'calendar' ? register.imported.snapshotAt : null;
   rc.listSnapshotMeta({ limit: 1 })
     .then((rows) => {

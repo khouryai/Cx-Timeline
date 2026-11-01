@@ -13,7 +13,7 @@
 
 import { clamp } from '../core/util.js';
 import { emit, EV } from '../core/events.js';
-import { MS_DAY, SCALES, startOfDay } from '../core/dates.js';
+import { MS_DAY, SCALES } from '../core/dates.js';
 
 /** Zoom bounds: ~28 years across a 1600px window, down to ~6 days. */
 export const MIN_PX_PER_DAY = 0.16;
@@ -210,12 +210,6 @@ export function visibleRange(overscanPx = 240) {
   return { from: originMs - pad, to: endMs() + pad };
 }
 
-/** True when `ms` currently falls inside the viewport. */
-export function isVisible(ms, overscanPx = 0) {
-  const { from, to } = visibleRange(overscanPx);
-  return ms >= from && ms <= to;
-}
-
 /** True when a time range intersects the viewport. */
 export function rangeVisible(startMs, stopMs, overscanPx = 240) {
   const { from, to } = visibleRange(overscanPx);
@@ -236,8 +230,3 @@ export function describeZoom() {
   return { scale: scale.label, span, pxPerDay: pxPerDay.toFixed(2) };
 }
 
-/** Snap the origin to a whole day so gridlines land on exact pixels. */
-export function alignOriginToDay() {
-  originMs = startOfDay(originMs);
-  publish('align');
-}

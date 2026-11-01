@@ -176,7 +176,7 @@ export function openImport(preset = 'progress') {
       parsed = null;
       clear(preview);
       status.textContent = '';
-      preview.appendChild(el('div', { class: 'cx-gate-msg bad', text: `Could not read the file: ${err.message}` }));
+      preview.appendChild(el('div', { class: 'cx-msg bad', text: `Could not read the file: ${err.message}` }));
     }
   }
 
@@ -186,7 +186,7 @@ export function openImport(preset = 'progress') {
     if (!parsed) return;
 
     for (const warning of parsed.warnings) {
-      preview.appendChild(el('div', { class: 'cx-gate-msg bad', style: { marginBottom: '8px' }, text: warning }));
+      preview.appendChild(el('div', { class: 'cx-msg bad', style: { marginBottom: '8px' }, text: warning }));
     }
 
     if (!parsed.activities.length) return;
@@ -212,7 +212,7 @@ export function openImport(preset = 'progress') {
 
     if (plan.placedAffected) {
       preview.appendChild(
-        el('div', { class: 'cx-gate-msg', style: { borderColor: 'var(--warn)', background: 'color-mix(in srgb, var(--warn) 12%, transparent)', marginTop: '9px' },
+        el('div', { class: 'cx-msg', style: { borderColor: 'var(--warn)', background: 'color-mix(in srgb, var(--warn) 12%, transparent)', marginTop: '9px' },
           text: `${plan.placedAffected} of the activities that moved are on your timeline. After importing you can choose which of your bars follow the new dates.` })
       );
     }
@@ -220,7 +220,7 @@ export function openImport(preset = 'progress') {
     const absentPlaced = plan.absent.filter((a) => a.placed);
     if (absentPlaced.length) {
       preview.appendChild(
-        el('div', { class: 'cx-gate-msg bad', style: { marginTop: '9px' },
+        el('div', { class: 'cx-msg bad', style: { marginTop: '9px' },
           text: `${absentPlaced.length} activity(s) on your timeline are not in this file — they will be marked, not removed.` })
       );
     }

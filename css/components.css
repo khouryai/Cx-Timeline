@@ -490,32 +490,6 @@
   background: var(--white);
 }
 
-/* ── Cards ──────────────────────────────────────────────────────────────── */
-.cx-card {
-  background: var(--card-bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-sm);
-  overflow: hidden;
-}
-.cx-card-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 11px 14px;
-  border-bottom: 1px solid var(--border);
-}
-.cx-card-title {
-  font-size: var(--fs-small);
-  font-weight: 700;
-  letter-spacing: 0.01em;
-  color: var(--text-main);
-}
-.cx-card-body {
-  padding: 14px;
-}
-
 /* ── Modals ─────────────────────────────────────────────────────────────── */
 .cx-modal-overlay {
   position: fixed;
@@ -913,13 +887,36 @@
 }
 
 /* ── Grid helper for inspector rows ─────────────────────────────────────── */
+/* `minmax(0, 1fr)`, not `1fr`: a column may not grow past its share for a
+   control's natural width — a date input's pushed the Filters pane's "to"
+   field out past the dock's edge. */
 .cx-row {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 9px;
 }
 .cx-row.three {
-  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+/* Fields side by side share their rows — label, control, hint — so a label
+   that wraps to two lines ("Duration (working days)") moves both controls
+   down together instead of dropping its own below its neighbour's. */
+.cx-row > .cx-field {
+  display: grid;
+  grid-row: span 3;
+  grid-template-rows: subgrid;
+  grid-template-columns: minmax(0, 1fr);
+  row-gap: 5px;
+  align-content: start;
+}
+.cx-row > .cx-field > .cx-label {
+  grid-row: 1;
+}
+.cx-row > .cx-field > :not(.cx-label, .cx-hint) {
+  grid-row: 2;
+}
+.cx-row > .cx-field > .cx-hint {
+  grid-row: 3;
 }
 .cx-inline {
   display: flex;
@@ -990,6 +987,7 @@
   gap: 2px;
 }
 .cx-listrow {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1032,15 +1030,36 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* A row's actions show on hover, on keyboard focus and on the active row.
+   Hidden, they take no room, so the name has the whole row: in the flow, five
+   invisible lane buttons cut every lane name to nine letters. They wait,
+   still clickable, exactly where they will appear, so pointing at one or
+   tabbing to one finds it. */
 .cx-listrow .lr-actions {
   display: flex;
+  flex-shrink: 0;
   gap: 2px;
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
   opacity: 0;
   transition: opacity var(--dur-fast) var(--easing);
 }
 .cx-listrow:hover .lr-actions,
+.cx-listrow:focus-within .lr-actions,
 .cx-listrow.active .lr-actions {
+  position: static;
+  transform: none;
   opacity: 1;
+}
+/* A touch screen has no hover to reveal them with. */
+@media (hover: none) {
+  .cx-listrow .lr-actions {
+    position: static;
+    transform: none;
+    opacity: 1;
+  }
 }
 
 /* ── Editable list options (Dropdown Lists pane + Manage lists dialog) ──── */
@@ -1140,59 +1159,6 @@
   gap: 6px;
 }
 
-/* ── Progress from the calendar ─────────────────────────────────────────── */
-
-.la-progress-head {
-  display: flex;
-  justify-content: flex-end;
-  margin-bottom: 8px;
-}
-.la-progress-wait {
-  margin-top: 3px;
-  font-size: var(--fs-tiny);
-  color: var(--text-muted);
-}
-.la-progress-toggle {
-  margin-top: 6px;
-}
-.la-progress-acts {
-  display: grid;
-  gap: 4px;
-  margin: 6px 0 0;
-  padding: 6px 8px;
-  list-style: none;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--surface-2);
-}
-.la-progress-acts[hidden] {
-  display: none;
-}
-.la-progress-act {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  gap: 10px;
-  align-items: center;
-  font-size: var(--fs-tiny);
-}
-.la-progress-act-title {
-  color: var(--text);
-  overflow-wrap: anywhere;
-}
-.la-progress-act-facts {
-  font-family: var(--f-mono);
-  color: var(--text-subtle);
-}
-@media (max-width: 560px) {
-  .la-progress-act {
-    grid-template-columns: minmax(0, 1fr) auto;
-  }
-  .la-progress-act-facts {
-    grid-column: 1 / -1;
-    grid-row: 2;
-  }
-}
-
 /* ── P6 register ───────────────────────────────────────────────────────── */
 
 .p6-stamps {
@@ -1241,31 +1207,6 @@
 }
 .cx-listrow.p6-row .cx-badge {
   flex: 0 0 auto;
-}
-
-/* The activity ID on a linked object, in the inspector. */
-.p6-link {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 7px 9px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--surface-2);
-}
-.p6-link .p6-id {
-  font-family: var(--f-mono);
-  font-size: var(--fs-tiny);
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  color: var(--text-main);
-}
-.p6-link .p6-dates {
-  flex: 1;
-  min-width: 0;
-  font-family: var(--f-mono);
-  font-size: var(--fs-micro);
-  color: var(--text-muted);
 }
 
 /* A P6 row carries a name, an id, dates and up to four badges. In a 250px

@@ -87,8 +87,6 @@ export function monthLabel(iso) {
    Rows
    ═══════════════════════════════════════════════════════════════════════ */
 
-export const KINDS = ['section', 'activity', 'resource', 'absence'];
-
 /** The six columns left of the calendar, in the order the 4WLA prints them. */
 export const FIELDS = [
   { key: 'activity_id', heading: 'Activity ID', width: 20.5703125 },

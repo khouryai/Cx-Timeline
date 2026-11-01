@@ -7,32 +7,24 @@
  * the top saying who has it and when they last saved, and the button that asks
  * them for it. It explains the state; it does not create it.
  *
- * Imports: util, events, filestore, access, icons, components.
+ * Imports: util, events, filestore, icons, components.
  */
 
 import { el } from '../core/util.js';
 import { on, EV } from '../core/events.js';
 import * as filestore from '../core/filestore.js';
-import * as access from '../core/access.js';
 import { icon } from './icons.js';
 import { toast } from './components.js';
 
 export function installAccessMode() {
   const apply = () => {
-    /* Two things can make a session read-only, and the interface says the
-       same thing for both — only the reason differs, and only the reason
-       decides whether there is anything the reader can do about it. A
-       colleague holding the pen on the plan: wait, ask, or take it. And a
-       session that may not edit the plan at all, which outranks the pen —
-       there is nobody to ask, so the banner says why and offers nothing. */
-    const locked = access.planLocked();
-    const viewingFolder = !locked && filestore.isViewer();
-    const readOnly = locked || viewingFolder;
+    /* A colleague holding the pen on the plan is what makes a session
+       read-only: wait, ask, or take it. */
+    const readOnly = filestore.isViewer();
     document.body.classList.toggle('read-only', readOnly);
-    renderBanner(readOnly, viewingFolder ? filestore.state() : null);
+    renderBanner(readOnly, readOnly ? filestore.state() : null);
   };
 
-  on(EV.ACCESS_CHANGED, apply);
   on(EV.FILE_STATE, apply);
 
   // One notice per burst — a viewer holding an arrow key would otherwise
@@ -45,9 +37,7 @@ export function installAccessMode() {
     toast({
       tone: 'warn',
       title: 'Read-only',
-      message: access.planLocked()
-        ? access.lockReason()
-        : 'A colleague has the pen on this plan. Ask for it, or take over editing in Import / export.',
+      message: 'A colleague has the pen on this plan. Ask for it, or take over editing in Import / export.',
     });
   });
 
@@ -87,11 +77,9 @@ function renderBanner(readOnly, folder = null) {
   const idle = folder && Number.isFinite(folder.holderIdleMs)
     ? ` Last saved ${since(folder.holderIdleMs)}.`
     : '';
-  const message = access.planLocked()
-    ? `Read-only — ${access.lockReason()}`
-    : holder
-      ? `Read-only — ${holder} has this plan open.${idle}`
-      : 'Read-only — this plan cannot be edited here.';
+  const message = holder
+    ? `Read-only — ${holder} has this plan open.${idle}`
+    : 'Read-only — this plan cannot be edited here.';
 
   const kids = [
     el('span', { class: 'ro-icon', html: icon('eye', { size: 13 }) }),

@@ -27,7 +27,7 @@ import { MS_DAY, daysBetween } from '../core/dates.js';
 import {
   TYPES, baselineSnapshot, delayReason, visibleNote, actualRange, comparedRange,
 } from '../core/model.js';
-import { getDoc, orderedLanes, getLane, activeBaseline } from '../core/store.js';
+import { getDoc, orderedLanes, activeBaseline } from '../core/store.js';
 import { msToPx, durationToPx, pxToDuration, visibleRange, rangeVisible } from './viewport.js';
 import { fontString, textWidth, wrapText, fitWidth } from './text.js';
 
@@ -1013,16 +1013,6 @@ export function laneAtY(geometry, y) {
   return geometry.lanes[geometry.lanes.length - 1] || null;
 }
 
-/** Which packed row within a lane a canvas y coordinate falls on. */
-export function rowAtY(laneEntry, y) {
-  if (!laneEntry || !laneEntry.rowTops.length) return 0;
-  const offset = y - laneEntry.contentY;
-  for (let r = laneEntry.rowTops.length - 1; r >= 0; r--) {
-    if (offset >= laneEntry.rowTops[r]) return r;
-  }
-  return 0;
-}
-
 /**
  * Hit-test: the topmost object rectangle containing a canvas point.
  * Iterates back to front so the object drawn last wins, matching what the
@@ -1068,28 +1058,3 @@ export function stageHeight(geometry) {
   return geometry.totalHeight + 80;
 }
 
-/** Lane entry for an object id, or null. */
-export function laneEntryFor(geometry, laneId) {
-  return geometry.byId.get(laneId) || null;
-}
-
-/** Convenience: the lane record an object belongs to. */
-export function laneOf(obj) {
-  return getLane(obj.lane);
-}
-
-/** Vertical geometry only — used where object placement is irrelevant. */
-export function laneLayout() {
-  const lanes = orderedLanes(false);
-  const out = [];
-  const byId = new Map();
-  let y = 0;
-  for (const lane of lanes) {
-    const height = lane.collapsed ? 26 : lane.height;
-    const entry = { lane, id: lane.id, y, height, contentY: y + LANE_PAD, contentH: Math.max(10, height - LANE_PAD * 2) };
-    out.push(entry);
-    byId.set(lane.id, entry);
-    y += height;
-  }
-  return { lanes: out, totalHeight: y, byId };
-}

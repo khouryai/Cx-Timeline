@@ -50,7 +50,6 @@ let db = null;
 let usingFallback = false;
 let editsSinceBackup = 0;
 let backupTimer = null;
-let lastSaveError = null;
 
 /**
  * True once a plan in a connected folder is the live document. Everything that
@@ -241,39 +240,6 @@ async function loadLatest() {
   }
 }
 
-/** Every project on disk, newest first — the "Open project" dialog uses this. */
-export async function listProjects() {
-  if (usingFallback) {
-    const d = lsGetJSON(LS_DOC);
-    return d ? [{ id: d.id, name: d.name, savedAt: d.modified, objects: (d.objects || []).length }] : [];
-  }
-  try {
-    const all = await wrap(tx(STORE_PROJECTS).getAll());
-    return all
-      .map((r) => ({ id: r.id, name: r.doc?.name || 'Untitled', savedAt: r.savedAt, objects: (r.doc?.objects || []).length }))
-      .sort((a, b) => b.savedAt - a.savedAt);
-  } catch {
-    return [];
-  }
-}
-
-export async function loadProject(id) {
-  if (usingFallback) {
-    const d = lsGetJSON(LS_DOC);
-    return d && d.id === id ? d : null;
-  }
-  const record = await wrap(tx(STORE_PROJECTS).get(id));
-  return record ? record.doc : null;
-}
-
-export async function deleteProject(id) {
-  if (usingFallback) {
-    localStorage.removeItem(LS_DOC);
-    return;
-  }
-  await wrap(tx(STORE_PROJECTS, 'readwrite').delete(id));
-}
-
 /* ── Saving ────────────────────────────────────────────────────────────── */
 
 /**
@@ -329,7 +295,6 @@ export async function saveNow() {
     }
 
     markClean();
-    lastSaveError = null;
     emit(EV.SAVE_DONE, { at: record.savedAt });
 
     editsSinceBackup++;
@@ -340,7 +305,6 @@ export async function saveNow() {
     }
     return true;
   } catch (err) {
-    lastSaveError = err;
     console.error('[cx-timeline] save failed:', err);
     emit(EV.SAVE_ERROR, { error: err });
     // A quota failure is the common case; surface it rather than silently
@@ -377,10 +341,6 @@ async function cacheLocally(record) {
 const scheduleSave = debounce(() => {
   saveNow();
 }, 500);
-
-export function getLastSaveError() {
-  return lastSaveError;
-}
 
 function wireAutosave() {
   on(EV.DOC_CHANGED, (payload) => {

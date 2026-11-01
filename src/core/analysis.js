@@ -9,7 +9,7 @@
  * Imports: dates, model.
  */
 
-import { MS_DAY, daysBetween, workingDaysBetween } from './dates.js';
+import { MS_DAY, daysBetween } from './dates.js';
 import {
   TYPES, LINK_TYPES, effectiveToday, baselineSnapshot, delayReason, comparedRange,
 } from './model.js';
@@ -446,7 +446,7 @@ export function objectHealth(obj, today) {
   if (!def?.duration) {
     if (obj.status === 'complete' || obj.status === 'released' || obj.status === 'closed') return { state: 'done', label: 'Complete' };
     if (obj.start < today) return { state: 'late', label: 'Date passed', days: daysBetween(obj.start, today) };
-    return { state: 'future', label: 'Upcoming' };
+    return { state: 'future', label: 'Upcoming', days: daysBetween(today, obj.start) };
   }
 
   const total = Math.max(1, obj.end - obj.start);
@@ -456,7 +456,7 @@ export function objectHealth(obj, today) {
 
   if (actual >= 100) return { state: 'done', label: 'Complete', expected, actual, variance: 100 - expected };
   if (today > obj.end) return { state: 'overdue', label: 'Overdue', expected: 100, actual, variance: actual - 100, days: daysBetween(obj.end, today) };
-  if (today < obj.start) return { state: 'future', label: 'Not started', expected: 0, actual, variance: actual };
+  if (today < obj.start) return { state: 'future', label: 'Not started', expected: 0, actual, variance: actual, days: daysBetween(today, obj.start) };
 
   const variance = actual - expected;
   if (variance < -15) return { state: 'behind', label: 'Behind plan', expected, actual, variance };
@@ -490,32 +490,3 @@ export function projectHealth(doc) {
   };
 }
 
-/**
- * Slip analysis relative to a baseline, grouped by lane — the view a
- * commissioning manager actually wants in a progress meeting.
- */
-export function slipByLane(doc, baseline) {
-  const { rows } = compareBaseline(doc, baseline);
-  const byLane = new Map();
-  for (const row of rows) {
-    if (!row.current) continue;
-    const laneId = row.current.lane;
-    if (!byLane.has(laneId)) byLane.set(laneId, { laneId, slip: 0, count: 0, worst: 0, rows: [] });
-    const entry = byLane.get(laneId);
-    entry.count++;
-    entry.slip += row.endShift;
-    entry.worst = Math.max(entry.worst, row.endShift);
-    entry.rows.push(row);
-  }
-  return Array.from(byLane.values()).sort((a, b) => b.worst - a.worst);
-}
-
-/**
- * Working days remaining on an object, honouring the project's holiday list.
- */
-export function workingDaysRemaining(obj, today, holidays = []) {
-  if (!TYPES[obj.type]?.duration) return 0;
-  const from = Math.max(today, obj.start);
-  if (from >= obj.end) return 0;
-  return workingDaysBetween(from, obj.end, holidays);
-}

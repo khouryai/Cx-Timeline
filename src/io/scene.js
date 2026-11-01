@@ -1151,4 +1151,3 @@ function legendRows(doc, filter) {
   })).sort((a, b) => b.count - a.count);
 }
 
-export const SCENE_METRICS = M;

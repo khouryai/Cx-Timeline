@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 29   Built: 2026-10-28T17:03:52.390Z
+ * Modules: 29   Built: 2026-11-01T15:03:50.344Z
  */
 (function () {
   'use strict';
@@ -24,7 +24,7 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
 
   const { el } = __req("core/util.js");
   const { emit, EV } = __req("core/events.js");
-  const { toISO, todayMs, fmtDate, addDays, MS_DAY } = __req("core/dates.js");
+  const { toISO, todayMs, fmtDate, MS_DAY } = __req("core/dates.js");
   const { resourceNames, readGrid, locationColumnOf, absencesFrom, ABSENCE_LABELS, ABSENCE_KINDS, cellTokens, cancellationEvents, supportCancellationEvents, attachCancellationNotes, bartCodes, isCancelMeaning } = __req("core/lookahead.js");
 
 
@@ -92,16 +92,6 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
     return ms - ((day + 6) % 7) * MS_DAY;
   }
 
-  /** The five working days of a week, as ISO strings. */
-  function weekDays(startMs) {
-    return [0, 1, 2, 3, 4].map((n) => toISO(addDays(startMs, n)));
-  }
-
-  /** The seven days, for a view that has to show a weekend possession. */
-  function allWeekDays(startMs) {
-    return [0, 1, 2, 3, 4, 5, 6].map((n) => toISO(addDays(startMs, n)));
-  }
-
   function todayISO() {
     return toISO(todayMs());
   }
@@ -143,17 +133,6 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
       const key = String(id);
       return names.get(key) || (key.startsWith('name:') ? key.slice(5) : '');
     };
-  }
-
-  /** Group rows under a key, for a grid that is people down and days across. */
-  function groupBy(rows, key) {
-    const map = new Map();
-    for (const row of rows || []) {
-      const k = typeof key === 'function' ? key(row) : row[key];
-      if (!map.has(k)) map.set(k, []);
-      map.get(k).push(row);
-    }
-    return map;
   }
 
   /** A row was written. Whatever is on screen reloads. */
@@ -281,25 +260,6 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   function goToTab(tab) {
     emit(EV.RC_SHOW_TAB, { tab });
   }
-
-  /**
-   * The five statuses, split into the two families that must never be averaged.
-   *
-   * Performance is what an individual did. Health is what was done to them — a
-   * possession released late is not underperformance, and counting it as such
-   * would make the number worse than useless, because people would stop saying
-   * they were blocked.
-   */
-  const STATUSES = [
-    { id: 'completed', label: 'Completed', key: 'c', family: 'performance', tone: 'good' },
-    { id: 'partial', label: 'Partial', key: 'p', family: 'performance', tone: 'warn' },
-    { id: 'carried', label: 'Carried over', key: 'x', family: 'performance', tone: 'warn' },
-    { id: 'blocked', label: 'Blocked', key: 'b', family: 'health', tone: 'bad' },
-    { id: 'reassigned', label: 'Reassigned', key: 'r', family: 'health', tone: 'info' },
-    { id: 'absent', label: 'Away', key: 'a', family: 'absence', tone: 'muted' },
-  ];
-
-  const STATUS_BY_ID = new Map(STATUSES.map((s) => [s.id, s]));
 
   /**
    * The three shifts, in the words the team uses.
@@ -512,32 +472,6 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
       if (key) map.set(key, l.id);
     }
     return map;
-  }
-
-  /**
-   * The spellings of a place the look-ahead uses that the register cannot place.
-   *
-   * The other half of pulling the location off the sheet. Keeping an unresolved
-   * spelling is only worth doing if somebody is shown it, and this is what the
-   * Resources tab lists — one click from "add it as a location" or "that is one we
-   * already have", exactly as an unmatched name and an unmapped colour are. A
-   * location nobody has mapped is work whose place is written down and not
-   * grouped, which is the one thing that makes a report quietly wrong rather than
-   * visibly incomplete.
-   */
-  function unmatchedLocations(laRows, register) {
-    const seen = new Map();
-    for (const row of laRows || []) {
-      if (row.location_id) continue;
-      const written = String(row.raw_location || '').trim();
-      const key = foldName(written);
-      if (!key || register?.get(key)) continue;
-      const held = seen.get(key) || { name: written, rows: [], weeks: new Set() };
-      if (!held.rows.some((r) => r.id === row.id)) held.rows.push(row);
-      if (row.week_start) held.weeks.add(row.week_start);
-      seen.set(key, held);
-    }
-    return [...seen.values()].sort((a, b) => b.rows.length - a.rows.length);
   }
 
   /**
@@ -1166,38 +1100,6 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   }
 
   /**
-   * How each drawn task went, from the huddle's outcomes.
-   *
-   * Returns `(entry, personId, iso) => outcome | null`. Indexed two ways because
-   * an outcome points at one plan entry where there was one to point at, and at
-   * nothing but a person and a date where the day was derived from the sheet — so
-   * both keys are needed or the derived days, which are most of them, would show
-   * no outcome at all. A stored entry is matched on its id and on nothing else:
-   * two tasks on one day each carry their own note. A derived day takes whichever
-   * outcome was recorded against the person and the date, preferring one that
-   * points at no entry, because there is no row for it to point at.
-   *
-   * One function because the week plan and the phone's week both draw "how it
-   * went" against a task, and two readings of one outcome is two answers.
-   */
-  function outcomeLookup(actuals) {
-    const byEntry = new Map();
-    const byDay = new Map();
-    for (const row of actuals || []) {
-      if (row.plan_entry_id) byEntry.set(row.plan_entry_id, row);
-      const key = `${row.person_id}|${row.work_date}`;
-      if (!byDay.has(key)) byDay.set(key, []);
-      byDay.get(key).push(row);
-    }
-    return (entry, personId, iso) => {
-      if (entry?.id && byEntry.has(entry.id)) return byEntry.get(entry.id);
-      if (entry?.id) return null;
-      const day = byDay.get(`${personId}|${iso}`) || [];
-      return day.find((a) => !a.plan_entry_id) || day[0] || null;
-    };
-  }
-
-  /**
    * Whether somebody is available on a date.
    *
    * Leave is the reason this exists. Absence is a different fact from "carried
@@ -1298,22 +1200,17 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
 
   Object.defineProperty(__x, "formModal", { get: () => formModal, enumerable: true });
   Object.defineProperty(__x, "weekStart", { get: () => weekStart, enumerable: true });
-  Object.defineProperty(__x, "weekDays", { get: () => weekDays, enumerable: true });
-  Object.defineProperty(__x, "allWeekDays", { get: () => allWeekDays, enumerable: true });
   Object.defineProperty(__x, "todayISO", { get: () => todayISO, enumerable: true });
   Object.defineProperty(__x, "isoToMs", { get: () => isoToMs, enumerable: true });
   Object.defineProperty(__x, "dayLabel", { get: () => dayLabel, enumerable: true });
   Object.defineProperty(__x, "byId", { get: () => byId, enumerable: true });
   Object.defineProperty(__x, "authorNames", { get: () => authorNames, enumerable: true });
-  Object.defineProperty(__x, "groupBy", { get: () => groupBy, enumerable: true });
   Object.defineProperty(__x, "codeNodes", { get: () => codeNodes, enumerable: true });
   Object.defineProperty(__x, "cancellationLog", { get: () => cancellationLog, enumerable: true });
   Object.defineProperty(__x, "notifyChanged", { get: () => notifyChanged, enumerable: true });
   Object.defineProperty(__x, "watchForNewReading", { get: () => watchForNewReading, enumerable: true });
   Object.defineProperty(__x, "orgNav", { get: () => orgNav, enumerable: true });
   Object.defineProperty(__x, "goToTab", { get: () => goToTab, enumerable: true });
-  Object.defineProperty(__x, "STATUSES", { get: () => STATUSES, enumerable: true });
-  Object.defineProperty(__x, "STATUS_BY_ID", { get: () => STATUS_BY_ID, enumerable: true });
   Object.defineProperty(__x, "SHIFTS", { get: () => SHIFTS, enumerable: true });
   Object.defineProperty(__x, "shiftLabel", { get: () => shiftLabel, enumerable: true });
   Object.defineProperty(__x, "foldName", { get: () => foldName, enumerable: true });
@@ -1323,7 +1220,6 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   Object.defineProperty(__x, "meMatcher", { get: () => meMatcher, enumerable: true });
   Object.defineProperty(__x, "personMatcher", { get: () => personMatcher, enumerable: true });
   Object.defineProperty(__x, "locationRegister", { get: () => locationRegister, enumerable: true });
-  Object.defineProperty(__x, "unmatchedLocations", { get: () => unmatchedLocations, enumerable: true });
   Object.defineProperty(__x, "uniqueFirstNames", { get: () => uniqueFirstNames, enumerable: true });
   Object.defineProperty(__x, "ambiguousFirstNames", { get: () => ambiguousFirstNames, enumerable: true });
   Object.defineProperty(__x, "newestPerKey", { get: () => newestPerKey, enumerable: true });
@@ -1338,7 +1234,6 @@ __mods["ui/rc_util.js"] = function (__x, __req) {
   Object.defineProperty(__x, "absenceAssignments", { get: () => absenceAssignments, enumerable: true });
   Object.defineProperty(__x, "shiftFor", { get: () => shiftFor, enumerable: true });
   Object.defineProperty(__x, "assignmentIndex", { get: () => assignmentIndex, enumerable: true });
-  Object.defineProperty(__x, "outcomeLookup", { get: () => outcomeLookup, enumerable: true });
   Object.defineProperty(__x, "availability", { get: () => availability, enumerable: true });
   Object.defineProperty(__x, "penButton", { get: () => penButton, enumerable: true });
   Object.defineProperty(__x, "takeOverEditing", { get: () => takeOverEditing, enumerable: true });
@@ -3055,8 +2950,6 @@ __mods["core/la_edit.js"] = function (__x, __req) {
      Rows
      ═══════════════════════════════════════════════════════════════════════ */
 
-  const KINDS = ['section', 'activity', 'resource', 'absence'];
-
   /** The six columns left of the calendar, in the order the 4WLA prints them. */
   const FIELDS = [
     { key: 'activity_id', heading: 'Activity ID', width: 20.5703125 },
@@ -4473,7 +4366,6 @@ __mods["core/la_edit.js"] = function (__x, __req) {
   Object.defineProperty(__x, "isWeekend", { get: () => isWeekend, enumerable: true });
   Object.defineProperty(__x, "weekdayLetter", { get: () => weekdayLetter, enumerable: true });
   Object.defineProperty(__x, "monthLabel", { get: () => monthLabel, enumerable: true });
-  Object.defineProperty(__x, "KINDS", { get: () => KINDS, enumerable: true });
   Object.defineProperty(__x, "FIELDS", { get: () => FIELDS, enumerable: true });
   Object.defineProperty(__x, "blankRow", { get: () => blankRow, enumerable: true });
   Object.defineProperty(__x, "newId", { get: () => newId, enumerable: true });
@@ -12685,7 +12577,7 @@ __mods["ui/rc_table.js"] = function (__x, __req) {
   const { saveFile } = __req("io/exporters.js");
 
   /** Tables drawn as a grid, where reordering rows would change what they say. */
-  const POSITIONAL = ['la-grid', 'rc-pto-grid', 'rc-huddle', 'rc-resources'];
+  const POSITIONAL = ['la-grid', 'rc-pto-grid'];
 
   /** Taller than this and the frame scrolls on its own, so the header can stay. */
   const TALL_ROWS = 14;

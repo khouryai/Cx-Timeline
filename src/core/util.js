@@ -22,15 +22,6 @@ export function clamp(v, lo, hi) {
   return v < lo ? lo : v > hi ? hi : v;
 }
 
-export function lerp(a, b, t) {
-  return a + (b - a) * t;
-}
-
-/** Round to `step`, e.g. round(37, 5) === 35. */
-export function roundTo(v, step) {
-  return step ? Math.round(v / step) * step : v;
-}
-
 /* ── Objects ───────────────────────────────────────────────────────────── */
 
 /** Structured deep clone with a JSON fallback for older engines. */
@@ -105,24 +96,6 @@ export function debounce(fn, ms = 200) {
     fn(...args);
   };
   return wrapped;
-}
-
-export function throttle(fn, ms = 60) {
-  let last = 0;
-  let pending = null;
-  return (...args) => {
-    const now = Date.now();
-    if (now - last >= ms) {
-      last = now;
-      fn(...args);
-    } else {
-      clearTimeout(pending);
-      pending = setTimeout(() => {
-        last = Date.now();
-        fn(...args);
-      }, ms - (now - last));
-    }
-  };
 }
 
 /** requestAnimationFrame coalescer — many calls, one frame. */
@@ -224,19 +197,6 @@ export function hexToRgb(hex) {
   };
 }
 
-export function rgbToHex(r, g, b) {
-  const h = (v) => clamp(Math.round(v), 0, 255).toString(16).padStart(2, '0');
-  return `#${h(r)}${h(g)}${h(b)}`;
-}
-
-/** Mix two hex colours; t=0 → a, t=1 → b. */
-export function mixHex(a, b, t) {
-  const ca = hexToRgb(a);
-  const cb = hexToRgb(b);
-  if (!ca || !cb) return a;
-  return rgbToHex(lerp(ca.r, cb.r, t), lerp(ca.g, cb.g, t), lerp(ca.b, cb.b, t));
-}
-
 export function withAlpha(hex, alpha) {
   const c = hexToRgb(hex);
   if (!c) return hex;
@@ -286,10 +246,6 @@ export function el(tag, attrs = {}, children = []) {
 
 export function $(sel, root = document) {
   return root.querySelector(sel);
-}
-
-export function $$(sel, root = document) {
-  return Array.from(root.querySelectorAll(sel));
 }
 
 /** Remove every child without touching the parent node itself. */

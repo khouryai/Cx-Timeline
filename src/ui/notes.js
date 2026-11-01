@@ -14,7 +14,7 @@
  * Imports: util, icons, components.
  */
 
-import { el, debounce, stripHtml, readFileAsDataURL, pickFiles, bytes } from '../core/util.js';
+import { el, debounce, readFileAsDataURL, pickFiles, bytes } from '../core/util.js';
 import { icon } from './icons.js';
 import { openModal, toast, promptDialog } from './components.js';
 
@@ -96,12 +96,6 @@ export function sanitiseHtml(html) {
 
   walk(body);
   return body.innerHTML;
-}
-
-/** Plain-text preview of a note, for tooltips and search results. */
-export function notePreview(html, max = 220) {
-  const text = stripHtml(html);
-  return text.length > max ? text.slice(0, max - 1) + '…' : text;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════

@@ -10,7 +10,6 @@ import { TYPES } from '../core/model.js';
 import * as store from '../core/store.js';
 import { makeBackup } from '../core/storage.js';
 import * as filestore from '../core/filestore.js';
-import * as access from '../core/access.js';
 import * as renderer from '../timeline/renderer.js';
 import { icon } from './icons.js';
 import {
@@ -74,13 +73,7 @@ function sharedFolderSection() {
         ]),
       ])
     );
-    /* The pen is a turn among people who can write. An account the calendar
-       says may not edit the plan has no turn to take, so the button is not
-       offered and the reason is said instead — `filestore.takeOver()` would
-       refuse it anyway, and a button that always refuses is worse than none. */
-    if (!editing && access.planLocked()) {
-      rows.push(el('div', { class: 'cx-hint', text: access.lockReason() }));
-    } else if (!editing) {
+    if (!editing) {
       rows.push(wideBtn('Take over editing', 'refresh', () => cmd.takeOverEditing()));
     }
     rows.push(
