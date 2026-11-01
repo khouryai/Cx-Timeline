@@ -84,7 +84,7 @@ export function paneFilters(root) {
   const filters = store.getFilters();
 
   root.appendChild(
-    el('div', { style: { display: 'flex', gap: '6px', marginBottom: '11px' } }, [
+    el('div', { class: 'cx-btn-row' }, [
       el('button', {
         class: 'cx-btn mini',
         html: icon('refresh', { size: 12 }) + '<span>Clear all</span>',
@@ -176,7 +176,7 @@ export function paneFilters(root) {
   const hidden = doc.objects.filter((o) => o.hidden);
   if (hidden.length) {
     root.appendChild(section(`Hidden objects (${hidden.length})`, [
-      el('div', { class: 'cx-list' }, hidden.map((obj) => el('div', { class: 'cx-listrow', style: { cursor: 'default' } }, [
+      el('div', { class: 'cx-list' }, hidden.map((obj) => el('div', { class: 'cx-listrow static' }, [
         el('div', { class: 'lr-main' }, [
           el('div', { class: 'lr-title', text: obj.title }),
           el('div', { class: 'lr-meta', text: fmtDate(obj.start, 'numeric') }),

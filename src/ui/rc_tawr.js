@@ -50,6 +50,38 @@ function dateLabel(iso) {
   return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
 }
 
+/** One day's hours as the card says them: "0700–1900", "2200–0600 (shift hours)", or "no hours". */
+function hoursLabel(d) {
+  if (!d.start && !d.end) return 'no hours';
+  return `${d.start || '?'}–${d.end || '?'}${d.fromShift ? ' (shift hours)' : ''}`;
+}
+
+/**
+ * The days of a request, a run of days with the same hours said once:
+ * "Mon 12 – Sun 18 Oct: 2200–0600 (shift hours)". Spelt out a day at a time,
+ * a week of unknown hours was "?–? (shift hours)" seven times over.
+ */
+function daysLine(days) {
+  const sorted = [...days].sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  const runs = [];
+  for (const d of sorted) {
+    const hours = hoursLabel(d);
+    const last = runs[runs.length - 1];
+    const next = last && utc(last.to).getTime() + 86400000 === utc(d.date).getTime();
+    if (last && next && last.hours === hours) last.to = d.date;
+    else runs.push({ from: d.date, to: d.date, hours });
+  }
+  return runs.map(({ from, to, hours }) => {
+    if (from === to) return `${dayLabel(from)}: ${hours}`;
+    const a = utc(from);
+    const b = utc(to);
+    const span = a.getUTCMonth() === b.getUTCMonth()
+      ? `${WEEKDAYS[a.getUTCDay()]} ${a.getUTCDate()} – ${dayLabel(to)}`
+      : `${dayLabel(from)} – ${dayLabel(to)}`;
+    return `${span}: ${hours}`;
+  }).join(' · ');
+}
+
 const state = { section: 'requests', week: null };
 
 /* ── BART's blank form, once per session ───────────────────────────────── */
@@ -314,7 +346,7 @@ function card(ctx, { group, record }, today) {
 
   node.appendChild(el('dl', { class: 'rc-tawr-facts' }, [
     el('dt', { text: 'Days' }),
-    el('dd', { text: days.map((d) => `${dayLabel(d.date)} ${d.start || '?'}–${d.end || '?'}${d.fromShift ? ' (shift hours)' : ''}`).join(' · ') || '—' }),
+    el('dd', { text: daysLine(days) || '—' }),
     el('dt', { text: 'Work' }),
     el('dd', { text: activities.map((a) => a.title).join(' · ') || '—' }),
     el('dt', { text: 'BART support' }),

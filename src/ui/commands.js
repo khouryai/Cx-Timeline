@@ -280,7 +280,7 @@ export function openHiddenList() {
     }
     const lanes = new Map(store.getDoc().lanes.map((l) => [l.id, l.name]));
     for (const obj of hidden) {
-      list.appendChild(el('div', { class: 'cx-listrow', dataset: { id: obj.id }, style: { cursor: 'default' } }, [
+      list.appendChild(el('div', { class: 'cx-listrow static', dataset: { id: obj.id } }, [
         el('div', { class: 'lr-main' }, [
           el('div', { class: 'lr-title', text: obj.title }),
           el('div', { class: 'lr-meta', text: `${lanes.get(obj.lane) || 'no lane'} · ${fmtDate(obj.start, 'numeric')}` }),

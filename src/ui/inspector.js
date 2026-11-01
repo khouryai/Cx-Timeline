@@ -220,26 +220,28 @@ function healthStrip(obj) {
     }
   }
 
-  return el('div', { style: { padding: '11px 12px', borderBottom: '1px solid var(--border)', display: 'flex', flexWrap: 'wrap', gap: '6px' } }, [
+  return el('div', { class: 'ih-health' }, [
     ...chips,
-    el('div', { class: 'cx-hint', style: { width: '100%', marginTop: '2px' }, text: healthMessage(health) }),
+    el('div', { class: 'cx-hint', text: healthMessage(health) }),
   ]);
 }
 
 function healthMessage(health) {
+  // `health.days` is the calendar distance to a date, not a duration.
+  const span = (days) => fmtDuration(days || 0, { calendar: true });
   switch (health.state) {
-    case 'overdue': return `Overdue by ${fmtDuration(health.days || 0)} — finish date has passed.`;
+    case 'overdue': return `Overdue by ${span(health.days)} — finish date has passed.`;
     case 'behind': return `${Math.abs(health.variance)}% behind the straight-line plan (${health.expected}% expected).`;
     case 'ahead': return `${health.variance}% ahead of the straight-line plan.`;
     case 'ontrack': return `Tracking to plan (${health.expected}% expected, ${health.actual}% reported).`;
     case 'done': return 'Complete.';
-    case 'late': return `Planned date passed ${fmtDuration(health.days || 0)} ago.`;
+    case 'late': return `Planned date passed ${span(health.days)} ago.`;
     /* Before its start date — but the work may have begun early, and saying
        "not started" over 45% done contradicted the chips just above. */
     case 'future':
       if (!health.days) return 'Due today.';
-      if (health.label === 'Upcoming') return `Due in ${fmtDuration(health.days)}.`;
-      return `Planned to start in ${fmtDuration(health.days)}`
+      if (health.label === 'Upcoming') return `Due in ${span(health.days)}.`;
+      return `Planned to start in ${span(health.days)}`
         + (health.actual > 0 ? ` — ${health.actual}% already reported.` : '.');
     default: return 'Not started yet.';
   }
@@ -368,8 +370,7 @@ function scheduleFields(obj, def) {
           onChange: (v) => set(obj.id, { end: endForDuration(obj.start, v) }, 'Change duration'),
         })),
         field('Remaining', el('div', {
-          class: 'cx-input',
-          style: { display: 'flex', alignItems: 'center', color: 'var(--text-muted)', cursor: 'default' },
+          class: 'cx-input readout',
           text: fmtDuration(remainingDays(obj)),
         })),
       ])
@@ -922,8 +923,7 @@ function p6Fields(obj) {
 
   out.push(
     el('button', {
-      class: 'cx-btn mini',
-      style: { justifyContent: 'flex-start', width: '100%' },
+      class: 'cx-btn mini wide',
       html: icon('search', { size: 12 }) + '<span>Add a P6 activity…</span>',
       onClick: () => openActivityPicker(obj, register, linked),
     })
@@ -1071,7 +1071,7 @@ function renderMulti(objects) {
 
 
   bodyEl.append(
-    el('div', { style: { padding: '11px 12px', borderBottom: '1px solid var(--border)', display: 'flex', flexWrap: 'wrap', gap: '6px' } }, [
+    el('div', { class: 'ih-health' }, [
       chipStat('Objects', objects.length, 'info'),
       chipStat('Lanes', new Set(objects.map((o) => o.lane)).size, 'muted'),
       chipStat('Types', new Set(objects.map((o) => o.type)).size, 'muted'),

@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 29   Built: 2026-11-01T15:03:50.344Z
+ * Modules: 31   Built: 2026-11-01T16:26:46.141Z
  */
 (function () {
   'use strict';
@@ -6202,6 +6202,713 @@ __mods["ui/rc_ingest.js"] = function (__x, __req) {
   Object.defineProperty(__x, "checkNowButton", { get: () => checkNowButton, enumerable: true });
 };
 
+// ui/rc_la_p6.js
+__mods["ui/rc_la_p6.js"] = function (__x, __req) {
+  /**
+   * Look-ahead → P6 activities: the schedule's IDs, imported from an extract,
+   * and the reasons a row has none — with the picker the editor links a row by.
+   *
+   * The look-ahead's Activity ID column is how a row is joined to the schedule
+   * and to anything else keyed on P6, so it is filled from the schedule's own
+   * list rather than typed from memory. This module reads that list in from
+   * whatever extract the scheduler sends (`.xlsx`, `.csv` or P6's own `.xer`),
+   * shows what an import would change before writing anything, and keeps the
+   * short list of reasons a row may give instead — Troubleshooting, Regression,
+   * Support. The rules are `core/la_p6.js`; this is where they meet a person.
+   *
+   * Imports: util, rc, core/la_p6, core/la_edit, io/lookahead, icons,
+   *          components, rc_util, rc_la_state, rc_ingest.
+   */
+
+  const { el, clear } = __req("core/util.js");
+  const rc = __req("core/rc.js");
+  const p6 = __req("core/la_p6.js");
+  const { newId } = __req("core/la_edit.js");
+  const { readZip, readSheets, parseSheet } = __req("io/lookahead.js");
+  const { icon } = __req("ui/icons.js");
+  const { textInput, toast, emptyState, openModal, checkbox, badge, field } = __req("ui/components.js");
+  const { notifyChanged, formModal, authorNames } = __req("ui/rc_util.js");
+  const { la, table } = __req("ui/rc_la_state.js");
+  const { EDITOR_SOURCE } = __req("ui/rc_ingest.js");
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The register, as everything here reads it
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * The activities and the reasons, with their lookups (`p6Index()`).
+   *
+   * `available` is false on a database that has not had `rc_schema.sql` run
+   * since P6 activities arrived: the reads are refused, and every P6 control
+   * stands down and says what to run, rather than offering an empty list as if
+   * nothing had ever been imported.
+   */
+  async function loadP6() {
+    try {
+      const [entries, flags] = await Promise.all([rc.listP6Activities(), rc.listP6Flags({ includeRetired: true })]);
+      return { available: true, entries, flags, index: p6.p6Index(entries, flags) };
+    } catch (err) {
+      return { available: false, error: err, entries: [], flags: [], index: p6.p6Index([], []) };
+    }
+  }
+
+  const UNREADABLE = 'The P6 list in calendar/p6.json could not be read. Try again once OneDrive has finished syncing the folder.';
+
+  /** A row's Activity ID in words, for the hover — the same wording in the editor and the read view. */
+  function p6Words(value, status) {
+    if (status.kind === 'linked') {
+      const e = status.entry;
+      return `${e.activity_id} — ${e.name}${e.wbs ? ` (${e.wbs})` : ''}${e.missing ? ' · not in the latest P6 extract' : ''}`;
+    }
+    if (status.kind === 'flagged') {
+      return `Not in P6: ${status.flag.label}${status.flag.active === false ? ' (a retired reason)' : ''}`;
+    }
+    if (status.kind === 'unknown') return `${String(value).trim()} is not in the P6 list`;
+    return '';
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Importing an extract
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /** A text file's characters: UTF-8 where it is, Windows' own encoding where it is not — as an .xer often is. */
+  async function textOf(file) {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    try {
+      return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    } catch {
+      return new TextDecoder('windows-1252').decode(bytes);
+    }
+  }
+
+  /**
+   * The activities in an extract, and where in it they were found.
+   *
+   * A workbook is read sheet by sheet until one has an Activity ID and an
+   * Activity Name column — TASK first, which is where P6's own spreadsheet
+   * export puts them — so a cover sheet or a sheet of relationships in front of
+   * the activities does not stop it. Hidden sheets are passed over.
+   */
+  async function readExtract(file) {
+    const kind = p6.p6FileKind(file.name);
+    if (!kind) {
+      throw new Error(`${file.name} is not a file this reads. Export the activities from P6, or save them from Excel, `
+        + 'as .xlsx, .csv or .xer.');
+    }
+    if (kind === 'xer') return { ...p6.readXer(await textOf(file)), from: 'its TASK table' };
+    if (kind === 'text') return { ...p6.readP6Rows(p6.splitTable(await textOf(file))), from: 'the file' };
+    const buffer = await file.arrayBuffer();
+    const sheets = readSheets(readZip(buffer)).filter((s) => s.state === 'visible' && s.zipPath);
+    const ordered = [...sheets.filter((s) => /^task$/i.test(s.name)), ...sheets.filter((s) => !/^task$/i.test(s.name))];
+    let first = null;
+    for (const sheet of ordered) {
+      const read = p6.readP6Rows(p6.gridRows(parseSheet(buffer, sheet.name)));
+      if (read.headerRow >= 0) return { ...read, from: `the "${sheet.name}" sheet` };
+      first = first || read;
+    }
+    return first || { activities: [], warnings: ['That workbook has no visible sheet to read.'], from: '' };
+  }
+
+  const count = (n, one, many = `${one}s`) => `${n.toLocaleString()} ${n === 1 ? one : many}`;
+
+  /**
+   * Pick an extract, see what importing it would change, and import it.
+   *
+   * Nothing is written until the preview is confirmed: how many activities were
+   * read and from where, the first few as they were read (so a column mapped
+   * wrongly is caught before it is imported), how many are new or renamed, and —
+   * said out loud — how many in the register this extract leaves out, which are
+   * marked missing rather than deleted. `host` holds the file input while it is
+   * open; `onDone` runs once the import has landed.
+   *
+   * @param {{ host?: HTMLElement | null, onDone?: Function | null }} [options]
+   */
+  function openP6Import({ host = null, onDone = null } = {}) {
+    const where = host || document.body;
+    for (const old of where.querySelectorAll(':scope > input.p6-file')) old.remove();
+    const input = el('input', { class: 'p6-file', type: 'file', accept: '.xlsx,.xlsm,.csv,.tsv,.txt,.xer', hidden: true });
+    where.appendChild(input);
+    input.addEventListener('change', async () => {
+      const file = input.files?.[0];
+      input.remove();
+      if (!file) return;
+      let read;
+      let register;
+      try {
+        [read, register] = await Promise.all([readExtract(file), rc.listP6Activities()]);
+      } catch (err) {
+        toast({ tone: 'bad', message: err.message, timeout: 12000 });
+        return;
+      }
+      if (!read.activities.length) {
+        toast({ tone: 'bad', message: `Nothing to import from ${file.name}: ${read.warnings.join(' ') || 'no activities in it.'}`, timeout: 12000 });
+        return;
+      }
+      previewImport(file, read, register, onDone);
+    });
+    input.click();
+    return input;
+  }
+
+  function previewImport(file, read, register, onDone) {
+    const diff = p6.p6Diff(register, read.activities);
+    const lines = [
+      `${count(read.activities.length, 'activity', 'activities')} read from ${read.from}.`,
+      register.length
+        ? [
+          diff.added.length ? `${count(diff.added.length, 'new one')}` : null,
+          diff.changed.length ? `${diff.changed.length.toLocaleString()} renamed or moved in the WBS` : null,
+          diff.back.length ? `${diff.back.length.toLocaleString()} back after a previous extract left them out` : null,
+          diff.unchanged ? `${diff.unchanged.toLocaleString()} unchanged` : null,
+        ].filter(Boolean).join(' · ') + '.'
+        : 'The first import: the list is empty until this one.',
+    ];
+    const sample = read.activities.slice(0, 5);
+    openP6Preview({
+      title: `Import ${file.name}`,
+      lines,
+      missing: diff.missing,
+      warnings: read.warnings || [],
+      sample,
+      confirmLabel: `Import ${count(read.activities.length, 'activity', 'activities')}`,
+      onConfirm: async () => {
+        const done = await rc.importP6Activities(read.activities, { importId: newId() });
+        toast({
+          tone: 'good',
+          message: `Imported ${count(done.written, 'P6 activity', 'P6 activities')}`
+            + (done.missing ? ` — ${count(done.missing, 'activity', 'activities')} no longer in the extract ${done.missing === 1 ? 'was' : 'were'} kept and marked.` : '.'),
+          timeout: 7000,
+        });
+        notifyChanged('p6');
+        if (onDone) await onDone(done);
+      },
+    });
+  }
+
+  function openP6Preview({ title, lines, missing, warnings, sample, confirmLabel, onConfirm }) {
+    formModal({
+      title,
+      confirmLabel,
+      body: el('div', { class: 'lae-form p6-preview' }, [
+        ...lines.map((text) => el('p', { class: 'p6-preview-line', text })),
+        missing.length
+          ? el('p', {
+            class: 'rc-hint rc-warn',
+            text: `${count(missing.length, 'activity', 'activities')} in the calendar's list ${missing.length === 1 ? 'is' : 'are'} not in this extract `
+              + `(${missing.slice(0, 4).map((a) => a.activity_id).join(', ')}${missing.length > 4 ? '…' : ''}). `
+              + 'They are kept and marked, never deleted — a row of the look-ahead may still name one.',
+          })
+          : null,
+        ...warnings.map((text) => el('p', { class: 'rc-hint', text })),
+        el('div', { class: 'rc-eyebrow', text: 'As read — check the columns are the right ones' }),
+        table(['Activity ID', 'Activity name', 'WBS'], sample.map((a) => el('tr', {}, [
+          el('td', { class: 'rc-mono', text: a.activity_id }),
+          el('td', { text: a.name }),
+          el('td', { class: 'rc-hint', text: a.wbs || '—' }),
+        ]))),
+      ]),
+      onConfirm,
+    });
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Choosing one
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  const SHOWN = 60;
+
+  /**
+   * Choose what an Activity ID says: a P6 activity, found by typing any part of
+   * its name, its ID or its WBS, or a reason the row has none.
+   *
+   * Before anything is typed it lists the activities the look-ahead already
+   * names, most-named first — linking the next line of a week of work to the
+   * activity the last line went to is the common case. Each says how many rows
+   * name it, so linking another is a choice made knowingly, never refused.
+   *
+   * `onPick` gets `{ value, entry, flag, fill }`: the text to write, the
+   * activity or reason it is, and whether to fill a blank description with the
+   * activity's name. `onClear` offers taking the ID off; `onImport` offers an
+   * import when the list is empty.
+   *
+   * @param {{ title: string, subtitle?: string, p6: any, uses?: Map<string, number>, query?: string,
+   *   current?: string | null, onPick: Function, onClear?: Function | null, onImport?: Function | null }} options
+   */
+  function openP6Picker({
+    title, subtitle = '', p6: ctx, uses = new Map(), query = '', current = null, onPick, onClear = null, onImport = null,
+  }) {
+    let handle = null;
+    let found = [];
+    let cursor = 0;
+    const fill = checkbox({ label: 'Fill a blank description with the P6 name', checked: true });
+    fill.classList.add('p6-fill');
+    const search = textInput({
+      value: query,
+      placeholder: ctx.entries.length
+        ? `Search ${count(ctx.entries.length, 'activity', 'activities')} — name, ID or WBS`
+        : 'No P6 activities imported yet',
+      'aria-label': 'Search P6 activities',
+    });
+    search.classList.add('p6-search');
+    const note = el('div', { class: 'rc-hint p6-picker-note' });
+    const list = el('div', { class: 'cx-picker-list p6-picker-list', role: 'listbox', 'aria-label': 'P6 activities' });
+
+    const take = (choice) => {
+      handle?.close();
+      onPick({ ...choice, fill: fill.querySelector('input').checked });
+    };
+
+    const draw = () => {
+      clear(list);
+      const q = search.value.trim();
+      if (!ctx.entries.length) {
+        list.appendChild(emptyState({
+          iconName: 'upload',
+          title: 'No P6 activities yet',
+          message: 'Import an extract from P6 — an .xlsx, .csv or .xer with Activity ID and Activity Name columns — and '
+            + 'its activities are offered here.',
+          action: onImport ? { label: 'Import a P6 extract…', onClick: () => { handle?.close(); onImport(); } } : null,
+        }));
+        note.textContent = '';
+        return;
+      }
+      if (q) {
+        found = p6.searchP6(ctx.entries, q, { limit: SHOWN + 1 });
+        note.textContent = found.length
+          ? (found.length > SHOWN ? `The first ${SHOWN} — keep typing to narrow it.` : '')
+          : `Nothing in P6 matches "${q}". Try fewer words, or part of the ID.`;
+        found = found.slice(0, SHOWN);
+      } else {
+        found = [...uses.entries()]
+          .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], undefined, { numeric: true }))
+          .map(([id]) => ctx.index.byId.get(id))
+          .filter(Boolean)
+          .slice(0, SHOWN);
+        note.textContent = found.length
+          ? 'Already on the look-ahead — or type to search them all.'
+          : `Type any part of an activity's name, its ID or its WBS.`;
+      }
+      cursor = Math.min(cursor, Math.max(0, found.length - 1));
+      found.forEach((entry, i) => {
+        const n = uses.get(entry.activity_id) || 0;
+        list.appendChild(el('div', {
+          class: `cx-picker-item p6-item${i === cursor ? ' on' : ''}${entry.activity_id === current ? ' p6-current' : ''}`,
+          role: 'option',
+          'aria-selected': String(i === cursor),
+          dataset: { id: entry.activity_id },
+          onClick: () => take({ value: entry.activity_id, entry }),
+        }, [
+          el('span', { class: 'p6-id', text: entry.activity_id }),
+          el('span', { class: 'p6-name', text: entry.name }),
+          el('span', { class: 'p6-meta' }, [
+            entry.wbs ? el('span', { text: entry.wbs }) : null,
+            n ? el('span', { class: 'p6-uses', text: `on ${count(n, 'row')}` }) : null,
+            entry.activity_id === current ? el('span', { class: 'p6-uses', text: 'this row' }) : null,
+            entry.missing ? badge('Not in the latest extract', 'warn') : null,
+          ].filter(Boolean)),
+        ]));
+      });
+      list.querySelector('.p6-item.on')?.scrollIntoView({ block: 'nearest' });
+    };
+
+    search.addEventListener('input', () => { cursor = 0; draw(); });
+    search.addEventListener('keydown', (e) => {
+      if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && found.length) {
+        e.preventDefault();
+        cursor = (cursor + (e.key === 'ArrowDown' ? 1 : -1) + found.length) % found.length;
+        draw();
+      } else if (e.key === 'Enter' && found[cursor]) {
+        e.preventDefault();
+        take({ value: found[cursor].activity_id, entry: found[cursor] });
+      }
+    });
+
+    const flags = ctx.flags.filter((f) => f.active !== false);
+    const reasons = el('div', { class: 'p6-reasons' }, [
+      el('div', { class: 'rc-eyebrow', text: 'Not in P6 — say why' }),
+      flags.length
+        ? el('div', { class: 'p6-reason-list' }, flags.map((flag) => el('button', {
+          class: `cx-btn mini p6-reason${String(current || '').trim().toLowerCase() === flag.label.toLowerCase() ? ' primary' : ''}`,
+          type: 'button',
+          text: flag.label,
+          title: `No P6 activity: ${flag.label}`,
+          onClick: () => take({ value: flag.label, flag }),
+        })))
+        : el('p', { class: 'rc-hint', text: 'No reasons on the list. Add them under Look-ahead → P6 activities.' }),
+    ]);
+
+    draw();
+    handle = openModal({
+      title,
+      subtitle,
+      size: 'wide',
+      body: el('div', { class: 'p6-picker' }, [search, fill, note, list, reasons]),
+      actions: [
+        { label: 'Cancel' },
+        onClear ? { label: 'Take the Activity ID off', onClick: () => onClear() } : null,
+      ].filter(Boolean),
+    });
+    setTimeout(() => {
+      search.focus();
+      search.setSelectionRange(search.value.length, search.value.length);
+    }, 40);
+    return handle;
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The section
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Look-ahead → P6 activities.
+   *
+   * What was imported and when, how the look-ahead's activities stand against
+   * it — linked, flagged, or still to do, one press from the editor — a search
+   * over the whole list, and the reasons a row may give instead of an ID.
+   */
+  async function renderP6(host) {
+    const [ctx, rows, people] = await Promise.all([
+      loadP6(),
+      rc.listLaRows().catch(() => []),
+      rc.listPeople({ includeInactive: true }).catch(() => []),
+    ]);
+    const written = la.source === EDITOR_SOURCE;
+
+    host.appendChild(el('div', { class: 'rc-section-head' }, [
+      el('h3', { text: 'P6 activities' }),
+      ctx.available ? el('button', {
+        class: 'cx-btn mini primary p6-import',
+        type: 'button',
+        html: icon('upload', { size: 12 }) + '<span>Import a P6 extract…</span>',
+        title: 'An .xlsx, .csv or .xer from P6 with Activity ID and Activity Name columns',
+        onClick: () => openP6Import({ host }),
+      }) : null,
+    ].filter(Boolean)));
+
+    if (!ctx.available) {
+      host.appendChild(emptyState({ iconName: 'warning', title: 'The P6 list could not be read', message: ctx.error?.message || UNREADABLE }));
+      return;
+    }
+
+    host.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'The schedule\'s activity IDs and names, read from a P6 extract. In Edit, typing in a row\'s Activity ID '
+        + 'searches them by name or ID, and Alt+K links every selected activity at once — several rows may name one '
+        + 'activity. A row with no P6 activity says why, from the list at the bottom. Importing again brings names up to '
+        + 'date and adds new activities; one a later extract leaves out is kept and marked, never deleted.',
+    }));
+
+    if (!ctx.entries.length) {
+      host.appendChild(emptyState({
+        iconName: 'upload',
+        title: 'Nothing imported yet',
+        message: 'Export the activities from P6 — Activity ID and Activity Name are all it needs; WBS is used if it is '
+          + 'there — as .xlsx, .csv or .xer, and import it here.',
+        action: { label: 'Import a P6 extract…', onClick: () => openP6Import({ host }) },
+      }));
+    } else {
+      const newest = ctx.entries.reduce((a, b) => (String(a.imported_at || '') > String(b.imported_at || '') ? a : b));
+      const who = authorNames(people)(newest.imported_by);
+      const missing = ctx.entries.filter((e) => e.missing).length;
+      host.appendChild(el('div', { class: 'p6-summary' }, [
+        el('span', { class: 'p6-summary-count', text: count(ctx.entries.length, 'activity', 'activities') }),
+        el('span', {
+          class: 'rc-hint',
+          style: 'margin:0',
+          text: [
+            newest.imported_at ? `last imported ${new Date(newest.imported_at).toLocaleString(undefined, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}` : null,
+            who ? `by ${who}` : null,
+            missing ? `${missing.toLocaleString()} not in the latest extract` : null,
+          ].filter(Boolean).join(' · '),
+        }),
+      ]));
+    }
+
+    /* ── How the look-ahead stands ─────────────────────────────────────── */
+    const coverage = p6.p6Coverage(rows, ctx.index);
+    if (written && coverage.activities) {
+      host.appendChild(el('div', { style: 'height:20px' }));
+      host.appendChild(el('div', { class: 'rc-section-head' }, [
+        el('h3', { text: 'The look-ahead\'s activities' }),
+        el('button', {
+          class: 'cx-btn mini',
+          type: 'button',
+          html: icon('edit', { size: 12 }) + '<span>Link them in the editor</span>',
+          onClick: () => { la.section = 'calendar'; la.editing = true; notifyChanged('lookahead'); },
+        }),
+      ]));
+      const todo = coverage.empty + coverage.unknown;
+      host.appendChild(el('div', { class: 'p6-coverage' }, [
+        stat('Linked to P6', coverage.linked, 'good'),
+        stat('Not in P6, with a reason', coverage.flagged, 'info'),
+        stat('Still to link', todo, todo ? 'warn' : 'good'),
+      ]));
+      const said = [
+        coverage.byFlag.size ? `Reasons given: ${[...coverage.byFlag.entries()].map(([label, n]) => `${label} ${n}`).join(', ')}.` : null,
+        coverage.unknown ? `${count(coverage.unknown, 'activity', 'activities')} ${coverage.unknown === 1 ? 'carries' : 'carry'} an ID the P6 list does not have `
+          + `(${[...new Set(rows.filter((r) => r.kind === 'activity' && !r.archived && p6.p6Status(r.activity_id, ctx.index).kind === 'unknown').map((r) => r.activity_id.trim()))].slice(0, 5).join(', ')}) — `
+          + 'a typo, or an activity from an older extract.' : null,
+      ].filter(Boolean).join(' ');
+      if (said) host.appendChild(el('p', { class: 'rc-hint', text: said }));
+    } else if (!written) {
+      host.appendChild(el('p', {
+        class: 'rc-hint',
+        text: 'Rows are linked in the look-ahead editor. The look-ahead is still read from the workbook here, so there is '
+          + 'nothing to link yet — the list can be imported ahead of that.',
+      }));
+    }
+
+    /* ── The list ──────────────────────────────────────────────────────── */
+    if (ctx.entries.length) {
+      host.appendChild(el('div', { style: 'height:20px' }));
+      host.appendChild(el('div', { class: 'rc-section-head' }, [el('h3', { text: 'Find an activity' })]));
+      const find = textInput({ placeholder: 'Name, ID or WBS — "ixl regression", "1040"', mini: true, 'aria-label': 'Find a P6 activity' });
+      find.classList.add('p6-find');
+      const results = el('div');
+      /* The results are redrawn, never the box: rebuilding a field under the
+         caret is the trap this project keeps relearning. */
+      const drawResults = () => {
+        clear(results);
+        const q = find.value.trim();
+        const shown = q
+          ? p6.searchP6(ctx.entries, q, { limit: 101 })
+          : [...coverage.uses.keys()].map((id) => ctx.index.byId.get(id)).filter(Boolean)
+            .sort((a, b) => a.activity_id.localeCompare(b.activity_id, undefined, { numeric: true }));
+        if (!shown.length) {
+          results.appendChild(el('p', {
+            class: 'rc-hint',
+            text: q ? `Nothing matches "${q}".` : 'No row of the look-ahead names a P6 activity yet. Type above to search the list.',
+          }));
+          return;
+        }
+        if (!q) results.appendChild(el('p', { class: 'rc-hint', style: 'margin:0 0 6px', text: 'The activities the look-ahead names. Type to search them all.' }));
+        const t = table(['Activity ID', 'Name', 'WBS', 'Rows'], shown.slice(0, 100).map((e) => el('tr', {
+          class: e.missing ? 'rc-inactive' : '',
+        }, [
+          el('td', { class: 'rc-mono', text: e.activity_id }),
+          el('td', {}, [e.name, e.missing ? el('span', { style: 'margin-left:6px' }, [badge('Not in the latest extract', 'warn')]) : null].filter(Boolean)),
+          el('td', { class: 'rc-hint', text: e.wbs || '—' }),
+          el('td', { class: 'rc-num', text: String(coverage.uses.get(e.activity_id) || '') }),
+        ])));
+        t.querySelector('table').dataset.plain = '1';
+        results.appendChild(t);
+        if (shown.length > 100) results.appendChild(el('p', { class: 'rc-hint', text: 'The first hundred — keep typing to narrow it.' }));
+      };
+      find.addEventListener('input', drawResults);
+      host.appendChild(el('div', { style: 'max-width:340px;margin-bottom:10px' }, [find]));
+      host.appendChild(results);
+      drawResults();
+    }
+
+    /* ── Reasons ───────────────────────────────────────────────────────── */
+    host.appendChild(el('div', { style: 'height:24px' }));
+    await reasonsAdmin(host, ctx, rows);
+  }
+
+  function stat(label, n, tone) {
+    return el('div', { class: `p6-stat p6-stat-${tone}` }, [
+      el('span', { class: 'p6-stat-n', text: n.toLocaleString() }),
+      el('span', { class: 'p6-stat-label', text: label }),
+    ]);
+  }
+
+  /**
+   * Why a row has no P6 activity: the reasons the editor offers beside the
+   * activities. Written into the row as the Activity ID, so a reason is reworded
+   * only while no row carries it — reworded under them, those rows would stop
+   * matching it — and retired rather than deleted, so the rows that give it keep
+   * saying so.
+   */
+  async function reasonsAdmin(host, ctx, rows) {
+    const flags = ctx.flags;
+    const usedBy = (flag) => rows.filter((r) => r.kind === 'activity'
+      && String(r.activity_id || '').trim().toLowerCase() === flag.label.trim().toLowerCase()).length;
+    const wrap = el('div', { class: 'p6-flags-admin' });
+    wrap.appendChild(el('div', { class: 'rc-section-head' }, [
+      el('h3', { text: 'Rows with no P6 activity' }),
+      el('button', {
+        class: 'cx-btn mini primary',
+        type: 'button',
+        html: icon('plus', { size: 12 }) + '<span>Add a reason</span>',
+        onClick: () => editFlag(null, ctx),
+      }),
+    ]));
+    wrap.appendChild(el('p', {
+      class: 'rc-hint',
+      text: 'Work the schedule does not carry still goes on the look-ahead — it says why instead of an ID. The editor '
+        + 'offers these beside the P6 activities, and the reason is written in the Activity ID column, so the export and '
+        + 'everything else reading the look-ahead carry it too.',
+    }));
+    if (!flags.length) {
+      wrap.appendChild(el('p', { class: 'rc-hint', text: 'No reasons yet.' }));
+    } else {
+      wrap.appendChild(table(['Reason', 'Rows', ''], flags.map((f) => {
+        const used = usedBy(f);
+        return el('tr', { class: f.active === false ? 'rc-inactive' : '' }, [
+          el('td', { text: f.label }),
+          el('td', { class: 'rc-num', text: used ? String(used) : '' }),
+          el('td', { style: 'text-align:right;white-space:nowrap' }, [
+            used ? null : el('button', { class: 'cx-btn mini ghost', type: 'button', text: 'Edit', onClick: () => editFlag(f, ctx) }),
+            el('button', {
+              class: 'cx-btn mini ghost',
+              type: 'button',
+              text: f.active === false ? 'Restore' : 'Retire',
+              title: f.active === false ? 'Offer it again' : 'Stop offering it. Rows already flagged with it keep saying so.',
+              onClick: async () => {
+                try {
+                  await rc.updateP6Flag(f.id, { active: f.active === false });
+                  notifyChanged('p6');
+                } catch (err) {
+                  toast({ tone: 'bad', message: err.message });
+                }
+              },
+            }),
+          ].filter(Boolean)),
+        ]);
+      })));
+    }
+    host.appendChild(wrap);
+  }
+
+  function editFlag(existing, ctx) {
+    const label = textInput({ value: existing?.label || '', placeholder: 'Troubleshooting', maxlength: '60' });
+    formModal({
+      title: existing ? `Reason: ${existing.label}` : 'Add a reason',
+      confirmLabel: existing ? 'Save' : 'Add',
+      body: el('div', { class: 'lae-form' }, [
+        field('Reason, as the row will say it', label, 'Written in the Activity ID column of a row with no P6 activity.'),
+      ]),
+      onConfirm: async () => {
+        const value = label.value.trim().replace(/\s+/g, ' ');
+        if (!value) throw new Error('Say what the reason is.');
+        if (value.length > 60) throw new Error('Sixty characters at most — it sits in the Activity ID column.');
+        const clash = ctx.flags.find((f) => f.label.trim().toLowerCase() === value.toLowerCase() && f.id !== existing?.id);
+        if (clash) throw new Error(`"${clash.label}" is already on the list${clash.active === false ? ' (retired — restore it instead)' : ''}.`);
+        if (ctx.index.byFold.get(value.toLowerCase()) || ctx.index.byId.get(value)) {
+          throw new Error(`${value} is a P6 activity ID, so a row carrying it would read as linked to that activity.`);
+        }
+        if (existing) await rc.updateP6Flag(existing.id, { label: value });
+        else await rc.addP6Flag({ label: value, active: true, sort: Math.max(0, ...ctx.flags.map((f) => f.sort || 0)) + 10 });
+        notifyChanged('p6');
+      },
+    });
+  }
+
+  Object.defineProperty(__x, "loadP6", { get: () => loadP6, enumerable: true });
+  Object.defineProperty(__x, "p6Words", { get: () => p6Words, enumerable: true });
+  Object.defineProperty(__x, "openP6Import", { get: () => openP6Import, enumerable: true });
+  Object.defineProperty(__x, "openP6Picker", { get: () => openP6Picker, enumerable: true });
+  Object.defineProperty(__x, "renderP6", { get: () => renderP6, enumerable: true });
+};
+
+// ui/rc_la_editor_state.js
+__mods["ui/rc_la_editor_state.js"] = function (__x, __req) {
+  /**
+   * The look-ahead editor's state (`E`), and the little the editor shares with
+   * its export.
+   *
+   * Here rather than in `ui/rc_la_editor.js` so that the export
+   * (`ui/rc_la_export.js`), which builds the workbook from what the editor holds,
+   * can read it without importing the editor — which imports the export for its
+   * toolbar, and the build rejects the cycle.
+   *
+   * Imports: rc, core/la_edit, core/la_p6.
+   */
+
+  const rc = __req("core/rc.js");
+  const ed = __req("core/la_edit.js");
+  const p6 = __req("core/la_p6.js");
+
+  const META = ed.FIELDS.length; // six activity columns, then the days
+
+  /**
+   * The editor's state, kept for the life of the page so a redraw of the tab —
+   * which any calendar write causes — never loses the selection, the undo
+   * history or unsaved work.
+   */
+  const E = {
+    model: null,
+    loaded: null, // { from, to } — the days whose cells are in the model
+    legend: [], // shift colours only: what the palette paints with
+    legendAll: [],
+    codes: [],
+    title: '',
+    start: null, // the Monday the window starts on
+    weeks: 4,
+    firstWritten: null, // the first day anything is written here — the editor holds nothing before its week
+    filter: '',
+    showArchived: false,
+    collapsed: new Set(),
+    anchor: { r: 0, c: META },
+    focus: { r: 0, c: META },
+    undo: [],
+    redo: [],
+    queue: [],
+    saving: null, // the save under way, if any
+    status: 'saved', // saved | saving | retry | conflict
+    retryIn: 0,
+    server: new Map(), // 'row:<id>' | 'cell:<row>|<day>' → the version the server holds
+    revision: 0,
+    dirtySincePublish: false,
+    publishTimer: null,
+    publishing: null, // the publish under way, so a flush can wait for it
+    publishError: null, // why the last publish failed, so Done editing can say so
+    pollTimer: null,
+    clip: null,
+    editing: null,
+    root: null,
+    view: null, // what is drawn: { rows, days, cols }
+    // Who is on the team, for the staffing check: a lookup from a written name to
+    // a person, and the leave booked in the calendar across the loaded days.
+    resolveName: null,
+    leave: [],
+    leaveKinds: new Map(),
+    staff: { issues: [], byCell: new Map() },
+    scroll: { left: 0, top: 0 },
+    // The schedule's activities and the reasons a row has none (`loadP6()`).
+    p6: { available: false, entries: [], flags: [], index: p6.p6Index() },
+  };
+
+  /** The legend as the editor paints with it: every row, and the shifts in force. */
+  function legendInForce(rows) {
+    const all = rows.map((r) => ({ argb: String(r.argb).toUpperCase(), meaning: r.meaning, role: r.role || 'shift', valid_from: r.valid_from }));
+    const inForce = new Map();
+    for (const r of all) {
+      const held = inForce.get(r.argb);
+      if (!held || String(r.valid_from || '') > String(held.valid_from || '')) inForce.set(r.argb, r);
+    }
+    return { all, shifts: [...inForce.values()].filter((r) => r.role === 'shift' && r.meaning) };
+  }
+
+  /** A day as the editor's headings and summaries say it: "12 Oct". */
+  function fmt(iso) {
+    const d = new Date(`${iso}T00:00:00Z`);
+    return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', timeZone: 'UTC' });
+  }
+
+  /** Make sure the cells of a window outside the one on screen are loaded. */
+  async function ensureWindow(days) {
+    const from = days[0];
+    const to = days[days.length - 1];
+    if (E.loaded && from >= E.loaded.from && to <= E.loaded.to) return;
+    const cells = await rc.listLaCells(from, to);
+    for (const c of cells.map(ed.cleanCell)) {
+      const key = ed.cellKey(c.row_id, c.day);
+      if (!E.model.cells.has(key)) {
+        E.model.cells.set(key, c);
+        E.server.set(`cell:${key}`, c.version || 0);
+      }
+    }
+    E.loaded = { from: [from, E.loaded?.from || from].sort()[0], to: [to, E.loaded?.to || to].sort().reverse()[0] };
+  }
+
+  Object.defineProperty(__x, "META", { get: () => META, enumerable: true });
+  Object.defineProperty(__x, "E", { get: () => E, enumerable: true });
+  Object.defineProperty(__x, "legendInForce", { get: () => legendInForce, enumerable: true });
+  Object.defineProperty(__x, "fmt", { get: () => fmt, enumerable: true });
+  Object.defineProperty(__x, "ensureWindow", { get: () => ensureWindow, enumerable: true });
+};
+
 // io/xlsx_write.js
 __mods["io/xlsx_write.js"] = function (__x, __req) {
   /**
@@ -7306,9 +8013,10 @@ __mods["ui/rc_la_schedule.js"] = function (__x, __req) {
    * — the same rule as the master export's, with settings of its own, because
    * the two go to different people at different times.
    *
-   * What is drawn comes from the screens that draw it — the workbook from the
-   * editor (`lookaheadFileNow()`), the PDF and PNG from the look-ahead
-   * (`lookaheadSheetsNow()`). Both import this module for the dialog, so they
+   * What is drawn comes from the screens that draw it — the workbook from Export
+   * to Excel (`lookaheadFileNow()`, `ui/rc_la_export.js`), the PDF and PNG from
+   * the look-ahead (`lookaheadSheetsNow()`). Both import this module for the
+   * dialog, so they
    * hand their builders over (`provide4wla()`) rather than being imported back,
    * which the build would refuse as a cycle.
    *
@@ -7622,603 +8330,204 @@ __mods["ui/rc_la_schedule.js"] = function (__x, __req) {
   Object.defineProperty(__x, "scheduleSection", { get: () => scheduleSection, enumerable: true });
 };
 
-// ui/rc_la_p6.js
-__mods["ui/rc_la_p6.js"] = function (__x, __req) {
+// ui/rc_la_export.js
+__mods["ui/rc_la_export.js"] = function (__x, __req) {
   /**
-   * Look-ahead → P6 activities: the schedule's IDs, imported from an extract,
-   * and the reasons a row has none — with the picker the editor links a row by.
+   * The 4WLA as an .xlsx — Export to Excel in the editor and in the calendar's
+   * read view, and `4WLA_Latest.xlsx` for the schedule.
    *
-   * The look-ahead's Activity ID column is how a row is joined to the schedule
-   * and to anything else keyed on P6, so it is filled from the schedule's own
-   * list rather than typed from memory. This module reads that list in from
-   * whatever extract the scheduler sends (`.xlsx`, `.csv` or P6's own `.xer`),
-   * shows what an import would change before writing anything, and keeps the
-   * short list of reasons a row may give instead — Troubleshooting, Regression,
-   * Support. The rules are `core/la_p6.js`; this is where they meet a person.
+   * Built from the editor's own state when it is open, and otherwise from the
+   * same rows and cells read afresh, so both places offer the identical
+   * workbook. The schedule's dialog is shown in the export dialog, and the
+   * schedule is handed the builder (`provide4wla()`) rather than importing it.
    *
-   * Imports: util, rc, core/la_p6, core/la_edit, io/lookahead, icons,
-   *          components, rc_util, rc_la_state, rc_ingest.
+   * Imports: util, rc, filestore, core/la_edit, io/la_xlsx, io/exporters,
+   *          components, rc_util, rc_ingest, rc_la_state, rc_la_schedule,
+   *          rc_la_editor_state.
    */
 
-  const { el, clear } = __req("core/util.js");
+  const { el } = __req("core/util.js");
   const rc = __req("core/rc.js");
-  const p6 = __req("core/la_p6.js");
-  const { newId } = __req("core/la_edit.js");
-  const { readZip, readSheets, parseSheet } = __req("io/lookahead.js");
-  const { icon } = __req("ui/icons.js");
-  const { textInput, toast, emptyState, openModal, checkbox, badge, field } = __req("ui/components.js");
-  const { notifyChanged, formModal, authorNames } = __req("ui/rc_util.js");
-  const { la, table } = __req("ui/rc_la_state.js");
+  const filestore = __req("core/filestore.js");
+  const ed = __req("core/la_edit.js");
+  const { lookaheadWorkbook, lookaheadFileName, lookaheadLatestName } = __req("io/la_xlsx.js");
+  const { saveFile } = __req("io/exporters.js");
+  const { toast, openModal, selectInput, segmented, checkbox } = __req("ui/components.js");
+  const { todayISO } = __req("ui/rc_util.js");
   const { EDITOR_SOURCE } = __req("ui/rc_ingest.js");
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     The register, as everything here reads it
-     ═══════════════════════════════════════════════════════════════════════ */
+  const { la } = __req("ui/rc_la_state.js");
+  const { provide4wla, scheduleSection } = __req("ui/rc_la_schedule.js");
+  const { E, fmt, legendInForce, ensureWindow } = __req("ui/rc_la_editor_state.js");
 
   /**
-   * The activities and the reasons, with their lookups (`p6Index()`).
-   *
-   * `available` is false on a database that has not had `rc_schema.sql` run
-   * since P6 activities arrived: the reads are refused, and every P6 control
-   * stands down and says what to run, rather than offering an empty list as if
-   * nothing had ever been imported.
+   * What an export is built from. The editor's own state when it is open — it
+   * holds exactly what was just typed — and otherwise the same rows and cells
+   * read afresh, so the calendar's read view offers the identical workbook
+   * without opening the editor, to anybody who can see the look-ahead.
    */
-  async function loadP6() {
+  async function exportSource() {
+    if (E.model) {
+      return { model: E.model, legend: E.legend, codes: E.codes, title: E.title, weeks: E.weeks, ensure: ensureWindow };
+    }
+    const [settings, legend, codes, rows] = await Promise.all([
+      rc.listSettings().catch(() => []),
+      rc.listLegend().catch(() => []),
+      rc.listSupportCodes({ includeRetired: true }).catch(() => []),
+      rc.listLaRows(),
+    ]);
+    const src = {
+      model: ed.makeModel(rows.map(ed.cleanRow), []),
+      legend: legendInForce(legend).shifts,
+      codes,
+      title: settings.find((r) => r.key === 'lookahead_title')?.value || '',
+      weeks: ed.WINDOW_WEEKS.includes(la.editorWeeks) ? la.editorWeeks : 4,
+      loaded: null,
+    };
+    src.ensure = async (days) => {
+      const from = days[0];
+      const to = days[days.length - 1];
+      if (src.loaded && from >= src.loaded.from && to <= src.loaded.to) return;
+      const cells = await rc.listLaCells(from, to);
+      src.model = ed.makeModel(rows.map(ed.cleanRow), cells.map(ed.cleanCell));
+      src.loaded = { from, to };
+    };
+    return src;
+  }
+
+  /**
+   * The 4WLA as an .xlsx, built without asking — names rows included — filed as
+   * `4WLA_Latest.xlsx` by the schedule in Export to Excel: every week written here, from the
+   * first day anything was (`laCellSpan()`) to the last, and never less than this
+   * week and the next three. `from` and `to` are the export's own dates, and
+   * narrow it; weeks nothing was ever written in are never drawn, however far
+   * back the dates reach. It used to be this week and the next three only, so
+   * the record of what the look-ahead said went out of the file as each week
+   * passed. Null until the look-ahead is written here: before that the workbook
+   * in the folder is the 4WLA, and the editor's tables would be an old copy of
+   * it — and null when the dates asked for hold nothing written.
+   */
+  async function lookaheadFileNow({ from = null, to = null } = {}) {
+    const settings = await rc.listSettings().catch(() => []);
+    const said = (key) => settings.find((r) => r.key === key)?.value;
+    if (said('lookahead_source') !== EDITOR_SOURCE) return null;
+    const span = await rc.laCellSpan().catch(() => ({ first: null, last: null }));
+    const thisMonday = ed.mondayOf(todayISO());
+    const first = [span.first, thisMonday].filter(Boolean).sort()[0];
+    const last = [span.last, ed.addDaysISO(thisMonday, 27)].filter(Boolean).sort().pop();
+    const start = ed.mondayOf(from && from > first ? from : first);
+    const end = to && to < last ? to : last;
+    if (end < start) return null;
+    const weeks = Math.floor((Date.parse(end) - Date.parse(start)) / (7 * 864e5)) + 1;
+    const days = ed.windowDays(start, weeks);
+    const src = await exportSource();
+    await src.ensure(days);
+    const sheetName = said('lookahead_sheet') || '4WLA';
+    const bytes = lookaheadWorkbook({
+      model: src.model, days, legend: src.legend, codes: src.codes.filter((c) => c.active !== false), title: src.title, sheetName,
+      resources: true,
+    });
+    return { bytes, name: lookaheadLatestName(sheetName), from: days[0], to: days[days.length - 1] };
+  }
+
+  // 4WLA_Latest.xlsx on a schedule is built here; that module files it.
+  provide4wla({ xlsx: () => lookaheadFileNow() });
+
+  /** The 4WLA as an .xlsx — from the editor, or from the calendar's read view. */
+  async function openExcelExport() {
+    let src;
     try {
-      const [entries, flags] = await Promise.all([rc.listP6Activities(), rc.listP6Flags({ includeRetired: true })]);
-      return { available: true, entries, flags, index: p6.p6Index(entries, flags) };
+      src = await exportSource();
     } catch (err) {
-      return { available: false, error: err, entries: [], flags: [], index: p6.p6Index([], []) };
-    }
-  }
-
-  const UNREADABLE = 'The P6 list in calendar/p6.json could not be read. Try again once OneDrive has finished syncing the folder.';
-
-  /** A row's Activity ID in words, for the hover — the same wording in the editor and the read view. */
-  function p6Words(value, status) {
-    if (status.kind === 'linked') {
-      const e = status.entry;
-      return `${e.activity_id} — ${e.name}${e.wbs ? ` (${e.wbs})` : ''}${e.missing ? ' · not in the latest P6 extract' : ''}`;
-    }
-    if (status.kind === 'flagged') {
-      return `Not in P6: ${status.flag.label}${status.flag.active === false ? ' (a retired reason)' : ''}`;
-    }
-    if (status.kind === 'unknown') return `${String(value).trim()} is not in the P6 list`;
-    return '';
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     Importing an extract
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /** A text file's characters: UTF-8 where it is, Windows' own encoding where it is not — as an .xer often is. */
-  async function textOf(file) {
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    try {
-      return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-    } catch {
-      return new TextDecoder('windows-1252').decode(bytes);
-    }
-  }
-
-  /**
-   * The activities in an extract, and where in it they were found.
-   *
-   * A workbook is read sheet by sheet until one has an Activity ID and an
-   * Activity Name column — TASK first, which is where P6's own spreadsheet
-   * export puts them — so a cover sheet or a sheet of relationships in front of
-   * the activities does not stop it. Hidden sheets are passed over.
-   */
-  async function readExtract(file) {
-    const kind = p6.p6FileKind(file.name);
-    if (!kind) {
-      throw new Error(`${file.name} is not a file this reads. Export the activities from P6, or save them from Excel, `
-        + 'as .xlsx, .csv or .xer.');
-    }
-    if (kind === 'xer') return { ...p6.readXer(await textOf(file)), from: 'its TASK table' };
-    if (kind === 'text') return { ...p6.readP6Rows(p6.splitTable(await textOf(file))), from: 'the file' };
-    const buffer = await file.arrayBuffer();
-    const sheets = readSheets(readZip(buffer)).filter((s) => s.state === 'visible' && s.zipPath);
-    const ordered = [...sheets.filter((s) => /^task$/i.test(s.name)), ...sheets.filter((s) => !/^task$/i.test(s.name))];
-    let first = null;
-    for (const sheet of ordered) {
-      const read = p6.readP6Rows(p6.gridRows(parseSheet(buffer, sheet.name)));
-      if (read.headerRow >= 0) return { ...read, from: `the "${sheet.name}" sheet` };
-      first = first || read;
-    }
-    return first || { activities: [], warnings: ['That workbook has no visible sheet to read.'], from: '' };
-  }
-
-  const count = (n, one, many = `${one}s`) => `${n.toLocaleString()} ${n === 1 ? one : many}`;
-
-  /**
-   * Pick an extract, see what importing it would change, and import it.
-   *
-   * Nothing is written until the preview is confirmed: how many activities were
-   * read and from where, the first few as they were read (so a column mapped
-   * wrongly is caught before it is imported), how many are new or renamed, and —
-   * said out loud — how many in the register this extract leaves out, which are
-   * marked missing rather than deleted. `host` holds the file input while it is
-   * open; `onDone` runs once the import has landed.
-   *
-   * @param {{ host?: HTMLElement | null, onDone?: Function | null }} [options]
-   */
-  function openP6Import({ host = null, onDone = null } = {}) {
-    const where = host || document.body;
-    for (const old of where.querySelectorAll(':scope > input.p6-file')) old.remove();
-    const input = el('input', { class: 'p6-file', type: 'file', accept: '.xlsx,.xlsm,.csv,.tsv,.txt,.xer', hidden: true });
-    where.appendChild(input);
-    input.addEventListener('change', async () => {
-      const file = input.files?.[0];
-      input.remove();
-      if (!file) return;
-      let read;
-      let register;
-      try {
-        [read, register] = await Promise.all([readExtract(file), rc.listP6Activities()]);
-      } catch (err) {
-        toast({ tone: 'bad', message: err.message, timeout: 12000 });
-        return;
-      }
-      if (!read.activities.length) {
-        toast({ tone: 'bad', message: `Nothing to import from ${file.name}: ${read.warnings.join(' ') || 'no activities in it.'}`, timeout: 12000 });
-        return;
-      }
-      previewImport(file, read, register, onDone);
-    });
-    input.click();
-    return input;
-  }
-
-  function previewImport(file, read, register, onDone) {
-    const diff = p6.p6Diff(register, read.activities);
-    const lines = [
-      `${count(read.activities.length, 'activity', 'activities')} read from ${read.from}.`,
-      register.length
-        ? [
-          diff.added.length ? `${count(diff.added.length, 'new one')}` : null,
-          diff.changed.length ? `${diff.changed.length.toLocaleString()} renamed or moved in the WBS` : null,
-          diff.back.length ? `${diff.back.length.toLocaleString()} back after a previous extract left them out` : null,
-          diff.unchanged ? `${diff.unchanged.toLocaleString()} unchanged` : null,
-        ].filter(Boolean).join(' · ') + '.'
-        : 'The first import: the list is empty until this one.',
-    ];
-    const sample = read.activities.slice(0, 5);
-    openP6Preview({
-      title: `Import ${file.name}`,
-      lines,
-      missing: diff.missing,
-      warnings: read.warnings || [],
-      sample,
-      confirmLabel: `Import ${count(read.activities.length, 'activity', 'activities')}`,
-      onConfirm: async () => {
-        const done = await rc.importP6Activities(read.activities, { importId: newId() });
-        toast({
-          tone: 'good',
-          message: `Imported ${count(done.written, 'P6 activity', 'P6 activities')}`
-            + (done.missing ? ` — ${count(done.missing, 'activity', 'activities')} no longer in the extract ${done.missing === 1 ? 'was' : 'were'} kept and marked.` : '.'),
-          timeout: 7000,
-        });
-        notifyChanged('p6');
-        if (onDone) await onDone(done);
-      },
-    });
-  }
-
-  function openP6Preview({ title, lines, missing, warnings, sample, confirmLabel, onConfirm }) {
-    formModal({
-      title,
-      confirmLabel,
-      body: el('div', { class: 'lae-form p6-preview' }, [
-        ...lines.map((text) => el('p', { class: 'p6-preview-line', text })),
-        missing.length
-          ? el('p', {
-            class: 'rc-hint rc-warn',
-            text: `${count(missing.length, 'activity', 'activities')} in the calendar's list ${missing.length === 1 ? 'is' : 'are'} not in this extract `
-              + `(${missing.slice(0, 4).map((a) => a.activity_id).join(', ')}${missing.length > 4 ? '…' : ''}). `
-              + 'They are kept and marked, never deleted — a row of the look-ahead may still name one.',
-          })
-          : null,
-        ...warnings.map((text) => el('p', { class: 'rc-hint', text })),
-        el('div', { class: 'rc-eyebrow', text: 'As read — check the columns are the right ones' }),
-        table(['Activity ID', 'Activity name', 'WBS'], sample.map((a) => el('tr', {}, [
-          el('td', { class: 'rc-mono', text: a.activity_id }),
-          el('td', { text: a.name }),
-          el('td', { class: 'rc-hint', text: a.wbs || '—' }),
-        ]))),
-      ]),
-      onConfirm,
-    });
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     Choosing one
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  const SHOWN = 60;
-
-  /**
-   * Choose what an Activity ID says: a P6 activity, found by typing any part of
-   * its name, its ID or its WBS, or a reason the row has none.
-   *
-   * Before anything is typed it lists the activities the look-ahead already
-   * names, most-named first — linking the next line of a week of work to the
-   * activity the last line went to is the common case. Each says how many rows
-   * name it, so linking another is a choice made knowingly, never refused.
-   *
-   * `onPick` gets `{ value, entry, flag, fill }`: the text to write, the
-   * activity or reason it is, and whether to fill a blank description with the
-   * activity's name. `onClear` offers taking the ID off; `onImport` offers an
-   * import when the list is empty.
-   *
-   * @param {{ title: string, subtitle?: string, p6: any, uses?: Map<string, number>, query?: string,
-   *   current?: string | null, onPick: Function, onClear?: Function | null, onImport?: Function | null }} options
-   */
-  function openP6Picker({
-    title, subtitle = '', p6: ctx, uses = new Map(), query = '', current = null, onPick, onClear = null, onImport = null,
-  }) {
-    let handle = null;
-    let found = [];
-    let cursor = 0;
-    const fill = checkbox({ label: 'Fill a blank description with the P6 name', checked: true });
-    fill.classList.add('p6-fill');
-    const search = textInput({
-      value: query,
-      placeholder: ctx.entries.length
-        ? `Search ${count(ctx.entries.length, 'activity', 'activities')} — name, ID or WBS`
-        : 'No P6 activities imported yet',
-      'aria-label': 'Search P6 activities',
-    });
-    search.classList.add('p6-search');
-    const note = el('div', { class: 'rc-hint p6-picker-note' });
-    const list = el('div', { class: 'cx-picker-list p6-picker-list', role: 'listbox', 'aria-label': 'P6 activities' });
-
-    const take = (choice) => {
-      handle?.close();
-      onPick({ ...choice, fill: fill.querySelector('input').checked });
-    };
-
-    const draw = () => {
-      clear(list);
-      const q = search.value.trim();
-      if (!ctx.entries.length) {
-        list.appendChild(emptyState({
-          iconName: 'upload',
-          title: 'No P6 activities yet',
-          message: 'Import an extract from P6 — an .xlsx, .csv or .xer with Activity ID and Activity Name columns — and '
-            + 'its activities are offered here.',
-          action: onImport ? { label: 'Import a P6 extract…', onClick: () => { handle?.close(); onImport(); } } : null,
-        }));
-        note.textContent = '';
-        return;
-      }
-      if (q) {
-        found = p6.searchP6(ctx.entries, q, { limit: SHOWN + 1 });
-        note.textContent = found.length
-          ? (found.length > SHOWN ? `The first ${SHOWN} — keep typing to narrow it.` : '')
-          : `Nothing in P6 matches "${q}". Try fewer words, or part of the ID.`;
-        found = found.slice(0, SHOWN);
-      } else {
-        found = [...uses.entries()]
-          .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], undefined, { numeric: true }))
-          .map(([id]) => ctx.index.byId.get(id))
-          .filter(Boolean)
-          .slice(0, SHOWN);
-        note.textContent = found.length
-          ? 'Already on the look-ahead — or type to search them all.'
-          : `Type any part of an activity's name, its ID or its WBS.`;
-      }
-      cursor = Math.min(cursor, Math.max(0, found.length - 1));
-      found.forEach((entry, i) => {
-        const n = uses.get(entry.activity_id) || 0;
-        list.appendChild(el('div', {
-          class: `cx-picker-item p6-item${i === cursor ? ' on' : ''}${entry.activity_id === current ? ' p6-current' : ''}`,
-          role: 'option',
-          'aria-selected': String(i === cursor),
-          dataset: { id: entry.activity_id },
-          onClick: () => take({ value: entry.activity_id, entry }),
-        }, [
-          el('span', { class: 'p6-id', text: entry.activity_id }),
-          el('span', { class: 'p6-name', text: entry.name }),
-          el('span', { class: 'p6-meta' }, [
-            entry.wbs ? el('span', { text: entry.wbs }) : null,
-            n ? el('span', { class: 'p6-uses', text: `on ${count(n, 'row')}` }) : null,
-            entry.activity_id === current ? el('span', { class: 'p6-uses', text: 'this row' }) : null,
-            entry.missing ? badge('Not in the latest extract', 'warn') : null,
-          ].filter(Boolean)),
-        ]));
-      });
-      list.querySelector('.p6-item.on')?.scrollIntoView({ block: 'nearest' });
-    };
-
-    search.addEventListener('input', () => { cursor = 0; draw(); });
-    search.addEventListener('keydown', (e) => {
-      if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && found.length) {
-        e.preventDefault();
-        cursor = (cursor + (e.key === 'ArrowDown' ? 1 : -1) + found.length) % found.length;
-        draw();
-      } else if (e.key === 'Enter' && found[cursor]) {
-        e.preventDefault();
-        take({ value: found[cursor].activity_id, entry: found[cursor] });
-      }
-    });
-
-    const flags = ctx.flags.filter((f) => f.active !== false);
-    const reasons = el('div', { class: 'p6-reasons' }, [
-      el('div', { class: 'rc-eyebrow', text: 'Not in P6 — say why' }),
-      flags.length
-        ? el('div', { class: 'p6-reason-list' }, flags.map((flag) => el('button', {
-          class: `cx-btn mini p6-reason${String(current || '').trim().toLowerCase() === flag.label.toLowerCase() ? ' primary' : ''}`,
-          type: 'button',
-          text: flag.label,
-          title: `No P6 activity: ${flag.label}`,
-          onClick: () => take({ value: flag.label, flag }),
-        })))
-        : el('p', { class: 'rc-hint', text: 'No reasons on the list. Add them under Look-ahead → P6 activities.' }),
-    ]);
-
-    draw();
-    handle = openModal({
-      title,
-      subtitle,
-      size: 'wide',
-      body: el('div', { class: 'p6-picker' }, [search, fill, note, list, reasons]),
-      actions: [
-        { label: 'Cancel' },
-        onClear ? { label: 'Take the Activity ID off', onClick: () => onClear() } : null,
-      ].filter(Boolean),
-    });
-    setTimeout(() => {
-      search.focus();
-      search.setSelectionRange(search.value.length, search.value.length);
-    }, 40);
-    return handle;
-  }
-
-  /* ══════════════════════════════════════════════════════════════════════════
-     The section
-     ═══════════════════════════════════════════════════════════════════════ */
-
-  /**
-   * Look-ahead → P6 activities.
-   *
-   * What was imported and when, how the look-ahead's activities stand against
-   * it — linked, flagged, or still to do, one press from the editor — a search
-   * over the whole list, and the reasons a row may give instead of an ID.
-   */
-  async function renderP6(host) {
-    const [ctx, rows, people] = await Promise.all([
-      loadP6(),
-      rc.listLaRows().catch(() => []),
-      rc.listPeople({ includeInactive: true }).catch(() => []),
-    ]);
-    const written = la.source === EDITOR_SOURCE;
-
-    host.appendChild(el('div', { class: 'rc-section-head' }, [
-      el('h3', { text: 'P6 activities' }),
-      ctx.available ? el('button', {
-        class: 'cx-btn mini primary p6-import',
-        type: 'button',
-        html: icon('upload', { size: 12 }) + '<span>Import a P6 extract…</span>',
-        title: 'An .xlsx, .csv or .xer from P6 with Activity ID and Activity Name columns',
-        onClick: () => openP6Import({ host }),
-      }) : null,
-    ].filter(Boolean)));
-
-    if (!ctx.available) {
-      host.appendChild(emptyState({ iconName: 'warning', title: 'The P6 list could not be read', message: ctx.error?.message || UNREADABLE }));
+      toast({ tone: 'bad', message: err.message, timeout: 10000 });
+      rc.reportError('lookahead:export', err);
       return;
     }
+    const thisMonday = ed.mondayOf(todayISO());
+    const starts = [-7, 0, 7, 14].map((d) => ed.addDaysISO(thisMonday, d));
+    const start = selectInput({
+      value: thisMonday,
+      options: starts.map((d, i) => ({ value: d, label: `${['Last week', 'This week', 'Next week', 'In two weeks'][i]} — from ${fmt(d)}` })),
+    });
+    let weeks = src.weeks;
+    const size = segmented({
+      value: weeks,
+      options: ed.WINDOW_WEEKS.map((w) => ({ value: w, label: `${w} weeks` })),
+      onChange: (w) => { weeks = w; update(); },
+    });
+    const summary = el('div', { class: 'rc-hint' });
+    const update = async () => {
+      const days = ed.windowDays(start.value, weeks);
+      await src.ensure(days).catch(() => {});
+      const rows = ed.rowsWithWork(src.model, days);
+      const n = rows.filter((r) => r.kind === 'activity').length;
+      summary.textContent = `${n} activit${n === 1 ? 'y' : 'ies'} with work between ${fmt(days[0])} and ${fmt(days[days.length - 1])}, `
+        + (la.exportResources
+          ? 'with their sections, names rows and the PTO / Office / Other group rows'
+          : 'with their sections — no names rows, and no PTO / Office / Other group rows')
+        + ' — in the 4WLA layout, ready to copy into the master file.';
+    };
+    const resourcesBox = checkbox({
+      label: 'Show resources — names under each activity, and the PTO, Office and Other group / project rows',
+      checked: la.exportResources,
+      onChange: (on) => { la.exportResources = on; update(); },
+    });
+    resourcesBox.classList.add('lae-export-resources');
+    start.addEventListener('change', update);
+    await update();
 
-    host.appendChild(el('p', {
-      class: 'rc-hint',
-      text: 'The schedule\'s activity IDs and names, read from a P6 extract. In Edit, typing in a row\'s Activity ID '
-        + 'searches them by name or ID, and Alt+K links every selected activity at once — several rows may name one '
-        + 'activity. A row with no P6 activity says why, from the list at the bottom. Importing again brings names up to '
-        + 'date and adds new activities; one a later extract leaves out is kept and marked, never deleted.',
-    }));
-
-    if (!ctx.entries.length) {
-      host.appendChild(emptyState({
-        iconName: 'upload',
-        title: 'Nothing imported yet',
-        message: 'Export the activities from P6 — Activity ID and Activity Name are all it needs; WBS is used if it is '
-          + 'there — as .xlsx, .csv or .xer, and import it here.',
-        action: { label: 'Import a P6 extract…', onClick: () => openP6Import({ host }) },
-      }));
-    } else {
-      const newest = ctx.entries.reduce((a, b) => (String(a.imported_at || '') > String(b.imported_at || '') ? a : b));
-      const who = authorNames(people)(newest.imported_by);
-      const missing = ctx.entries.filter((e) => e.missing).length;
-      host.appendChild(el('div', { class: 'p6-summary' }, [
-        el('span', { class: 'p6-summary-count', text: count(ctx.entries.length, 'activity', 'activities') }),
-        el('span', {
-          class: 'rc-hint',
-          style: 'margin:0',
-          text: [
-            newest.imported_at ? `last imported ${new Date(newest.imported_at).toLocaleString(undefined, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}` : null,
-            who ? `by ${who}` : null,
-            missing ? `${missing.toLocaleString()} not in the latest extract` : null,
-          ].filter(Boolean).join(' · '),
-        }),
-      ]));
-    }
-
-    /* ── How the look-ahead stands ─────────────────────────────────────── */
-    const coverage = p6.p6Coverage(rows, ctx.index);
-    if (written && coverage.activities) {
-      host.appendChild(el('div', { style: 'height:20px' }));
-      host.appendChild(el('div', { class: 'rc-section-head' }, [
-        el('h3', { text: 'The look-ahead\'s activities' }),
-        el('button', {
-          class: 'cx-btn mini',
-          type: 'button',
-          html: icon('edit', { size: 12 }) + '<span>Link them in the editor</span>',
-          onClick: () => { la.section = 'calendar'; la.editing = true; notifyChanged('lookahead'); },
-        }),
-      ]));
-      const todo = coverage.empty + coverage.unknown;
-      host.appendChild(el('div', { class: 'p6-coverage' }, [
-        stat('Linked to P6', coverage.linked, 'good'),
-        stat('Not in P6, with a reason', coverage.flagged, 'info'),
-        stat('Still to link', todo, todo ? 'warn' : 'good'),
-      ]));
-      const said = [
-        coverage.byFlag.size ? `Reasons given: ${[...coverage.byFlag.entries()].map(([label, n]) => `${label} ${n}`).join(', ')}.` : null,
-        coverage.unknown ? `${count(coverage.unknown, 'activity', 'activities')} ${coverage.unknown === 1 ? 'carries' : 'carry'} an ID the P6 list does not have `
-          + `(${[...new Set(rows.filter((r) => r.kind === 'activity' && !r.archived && p6.p6Status(r.activity_id, ctx.index).kind === 'unknown').map((r) => r.activity_id.trim()))].slice(0, 5).join(', ')}) — `
-          + 'a typo, or an activity from an older extract.' : null,
-      ].filter(Boolean).join(' ');
-      if (said) host.appendChild(el('p', { class: 'rc-hint', text: said }));
-    } else if (!written) {
-      host.appendChild(el('p', {
-        class: 'rc-hint',
-        text: 'Rows are linked in the look-ahead editor. The look-ahead is still read from the workbook here, so there is '
-          + 'nothing to link yet — the list can be imported ahead of that.',
-      }));
-    }
-
-    /* ── The list ──────────────────────────────────────────────────────── */
-    if (ctx.entries.length) {
-      host.appendChild(el('div', { style: 'height:20px' }));
-      host.appendChild(el('div', { class: 'rc-section-head' }, [el('h3', { text: 'Find an activity' })]));
-      const find = textInput({ placeholder: 'Name, ID or WBS — "ixl regression", "1040"', mini: true, 'aria-label': 'Find a P6 activity' });
-      find.classList.add('p6-find');
-      const results = el('div');
-      /* The results are redrawn, never the box: rebuilding a field under the
-         caret is the trap this project keeps relearning. */
-      const drawResults = () => {
-        clear(results);
-        const q = find.value.trim();
-        const shown = q
-          ? p6.searchP6(ctx.entries, q, { limit: 101 })
-          : [...coverage.uses.keys()].map((id) => ctx.index.byId.get(id)).filter(Boolean)
-            .sort((a, b) => a.activity_id.localeCompare(b.activity_id, undefined, { numeric: true }));
-        if (!shown.length) {
-          results.appendChild(el('p', {
-            class: 'rc-hint',
-            text: q ? `Nothing matches "${q}".` : 'No row of the look-ahead names a P6 activity yet. Type above to search the list.',
-          }));
-          return;
-        }
-        if (!q) results.appendChild(el('p', { class: 'rc-hint', style: 'margin:0 0 6px', text: 'The activities the look-ahead names. Type to search them all.' }));
-        const t = table(['Activity ID', 'Name', 'WBS', 'Rows'], shown.slice(0, 100).map((e) => el('tr', {
-          class: e.missing ? 'rc-inactive' : '',
-        }, [
-          el('td', { class: 'rc-mono', text: e.activity_id }),
-          el('td', {}, [e.name, e.missing ? el('span', { style: 'margin-left:6px' }, [badge('Not in the latest extract', 'warn')]) : null].filter(Boolean)),
-          el('td', { class: 'rc-hint', text: e.wbs || '—' }),
-          el('td', { class: 'rc-num', text: String(coverage.uses.get(e.activity_id) || '') }),
-        ])));
-        t.querySelector('table').dataset.plain = '1';
-        results.appendChild(t);
-        if (shown.length > 100) results.appendChild(el('p', { class: 'rc-hint', text: 'The first hundred — keep typing to narrow it.' }));
-      };
-      find.addEventListener('input', drawResults);
-      host.appendChild(el('div', { style: 'max-width:340px;margin-bottom:10px' }, [find]));
-      host.appendChild(results);
-      drawResults();
-    }
-
-    /* ── Reasons ───────────────────────────────────────────────────────── */
-    host.appendChild(el('div', { style: 'height:24px' }));
-    await reasonsAdmin(host, ctx, rows);
-  }
-
-  function stat(label, n, tone) {
-    return el('div', { class: `p6-stat p6-stat-${tone}` }, [
-      el('span', { class: 'p6-stat-n', text: n.toLocaleString() }),
-      el('span', { class: 'p6-stat-label', text: label }),
-    ]);
-  }
-
-  /**
-   * Why a row has no P6 activity: the reasons the editor offers beside the
-   * activities. Written into the row as the Activity ID, so a reason is reworded
-   * only while no row carries it — reworded under them, those rows would stop
-   * matching it — and retired rather than deleted, so the rows that give it keep
-   * saying so.
-   */
-  async function reasonsAdmin(host, ctx, rows) {
-    const flags = ctx.flags;
-    const usedBy = (flag) => rows.filter((r) => r.kind === 'activity'
-      && String(r.activity_id || '').trim().toLowerCase() === flag.label.trim().toLowerCase()).length;
-    const wrap = el('div', { class: 'p6-flags-admin' });
-    wrap.appendChild(el('div', { class: 'rc-section-head' }, [
-      el('h3', { text: 'Rows with no P6 activity' }),
-      el('button', {
-        class: 'cx-btn mini primary',
-        type: 'button',
-        html: icon('plus', { size: 12 }) + '<span>Add a reason</span>',
-        onClick: () => editFlag(null, ctx),
-      }),
-    ]));
-    wrap.appendChild(el('p', {
-      class: 'rc-hint',
-      text: 'Work the schedule does not carry still goes on the look-ahead — it says why instead of an ID. The editor '
-        + 'offers these beside the P6 activities, and the reason is written in the Activity ID column, so the export and '
-        + 'everything else reading the look-ahead carry it too.',
-    }));
-    if (!flags.length) {
-      wrap.appendChild(el('p', { class: 'rc-hint', text: 'No reasons yet.' }));
-    } else {
-      wrap.appendChild(table(['Reason', 'Rows', ''], flags.map((f) => {
-        const used = usedBy(f);
-        return el('tr', { class: f.active === false ? 'rc-inactive' : '' }, [
-          el('td', { text: f.label }),
-          el('td', { class: 'rc-num', text: used ? String(used) : '' }),
-          el('td', { style: 'text-align:right;white-space:nowrap' }, [
-            used ? null : el('button', { class: 'cx-btn mini ghost', type: 'button', text: 'Edit', onClick: () => editFlag(f, ctx) }),
-            el('button', {
-              class: 'cx-btn mini ghost',
-              type: 'button',
-              text: f.active === false ? 'Restore' : 'Retire',
-              title: f.active === false ? 'Offer it again' : 'Stop offering it. Rows already flagged with it keep saying so.',
-              onClick: async () => {
-                try {
-                  await rc.updateP6Flag(f.id, { active: f.active === false });
-                  notifyChanged('p6');
-                } catch (err) {
-                  toast({ tone: 'bad', message: err.message });
-                }
-              },
-            }),
-          ].filter(Boolean)),
-        ]);
-      })));
-    }
-    host.appendChild(wrap);
-  }
-
-  function editFlag(existing, ctx) {
-    const label = textInput({ value: existing?.label || '', placeholder: 'Troubleshooting', maxlength: '60' });
-    formModal({
-      title: existing ? `Reason: ${existing.label}` : 'Add a reason',
-      confirmLabel: existing ? 'Save' : 'Add',
+    const canFolder = filestore.hasFolder?.();
+    const build = async () => {
+      const days = ed.windowDays(start.value, weeks);
+      await src.ensure(days);
+      const settings = await rc.listSettings().catch(() => []);
+      const sheetName = settings.find((r) => r.key === 'lookahead_sheet')?.value || '4WLA';
+      const bytes = lookaheadWorkbook({
+        model: src.model, days, legend: src.legend, codes: src.codes.filter((c) => c.active !== false), title: src.title, sheetName,
+        resources: la.exportResources,
+      });
+      return { bytes, name: lookaheadFileName(days, sheetName) };
+    };
+    openModal({
+      title: 'Export to Excel',
+      subtitle: 'The same columns, merged headings and colours as the 4WLA',
       body: el('div', { class: 'lae-form' }, [
-        field('Reason, as the row will say it', label, 'Written in the Activity ID column of a row with no P6 activity.'),
+        el('label', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'Starting' }), start]),
+        el('div', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'Weeks' }), size]),
+        resourcesBox,
+        summary,
+        // The same 4WLA, filed as 4WLA_Latest on a schedule for sending on.
+        scheduleSection(),
       ]),
-      onConfirm: async () => {
-        const value = label.value.trim().replace(/\s+/g, ' ');
-        if (!value) throw new Error('Say what the reason is.');
-        if (value.length > 60) throw new Error('Sixty characters at most — it sits in the Activity ID column.');
-        const clash = ctx.flags.find((f) => f.label.trim().toLowerCase() === value.toLowerCase() && f.id !== existing?.id);
-        if (clash) throw new Error(`"${clash.label}" is already on the list${clash.active === false ? ' (retired — restore it instead)' : ''}.`);
-        if (ctx.index.byFold.get(value.toLowerCase()) || ctx.index.byId.get(value)) {
-          throw new Error(`${value} is a P6 activity ID, so a row carrying it would read as linked to that activity.`);
-        }
-        if (existing) await rc.updateP6Flag(existing.id, { label: value });
-        else await rc.addP6Flag({ label: value, active: true, sort: Math.max(0, ...ctx.flags.map((f) => f.sort || 0)) + 10 });
-        notifyChanged('p6');
-      },
+      actions: [
+        { label: 'Cancel' },
+        canFolder ? {
+          label: 'Save to the shared folder', onClick: async () => {
+            try {
+              const { bytes, name } = await build();
+              await filestore.intakeWrite(`lookahead/${name}`, bytes);
+              toast({ tone: 'good', title: 'Saved to the shared folder', message: `lookahead/${name}` });
+            } catch (err) {
+              toast({ tone: 'bad', message: err.message, timeout: 10000 });
+            }
+          },
+        } : null,
+        {
+          label: 'Download', kind: 'primary', autofocus: true, onClick: async () => {
+            try {
+              const { bytes, name } = await build();
+              saveFile(name, bytes, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'Look-ahead');
+            } catch (err) {
+              toast({ tone: 'bad', message: err.message, timeout: 10000 });
+              rc.reportError('lookahead:export', err);
+            }
+          },
+        },
+      ].filter(Boolean),
     });
   }
 
-  Object.defineProperty(__x, "loadP6", { get: () => loadP6, enumerable: true });
-  Object.defineProperty(__x, "p6Words", { get: () => p6Words, enumerable: true });
-  Object.defineProperty(__x, "openP6Import", { get: () => openP6Import, enumerable: true });
-  Object.defineProperty(__x, "openP6Picker", { get: () => openP6Picker, enumerable: true });
-  Object.defineProperty(__x, "renderP6", { get: () => renderP6, enumerable: true });
+  Object.defineProperty(__x, "lookaheadFileNow", { get: () => lookaheadFileNow, enumerable: true });
+  Object.defineProperty(__x, "openExcelExport", { get: () => openExcelExport, enumerable: true });
 };
 
 // ui/rc_la_editor.js
@@ -8251,13 +8560,12 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
    * short list (`ui/rc_la_p6.js`, `core/la_p6.js`).
    *
    * Imports: util, rc, core/la_edit, core/la_p6, core/lookahead, io/lookahead,
-   *          io/la_xlsx, io/exporters, filestore, icons, components, rc_util,
-   *          rc_ingest, rc_la_state, rc_la_p6.
+   *          icons, components, rc_util, rc_ingest, rc_la_state, rc_la_p6,
+   *          rc_la_editor_state, rc_la_export (Export to Excel).
    */
 
   const { el, clear } = __req("core/util.js");
   const rc = __req("core/rc.js");
-  const filestore = __req("core/filestore.js");
   const ed = __req("core/la_edit.js");
   const p6 = __req("core/la_p6.js");
   const { readGrid, isCancelMeaning, countCodes, describeCodeCounts, cellTokens, cancellationNoteFor, cancellationReasonText } = __req("core/lookahead.js");
@@ -8265,11 +8573,8 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
 
 
   const { parseSheet, applyLegend, readLegend, isDark } = __req("io/lookahead.js");
-  const { lookaheadWorkbook, lookaheadFileName, lookaheadLatestName } = __req("io/la_xlsx.js");
-  const { provide4wla, scheduleSection } = __req("ui/rc_la_schedule.js");
-  const { saveFile } = __req("io/exporters.js");
   const { icon } = __req("ui/icons.js");
-  const { toast, confirmDialog, contextMenu, openModal, textInput, selectInput, segmented, emptyState, attachTooltip, checkbox } = __req("ui/components.js");
+  const { toast, confirmDialog, contextMenu, openModal, textInput, selectInput, segmented, emptyState, attachTooltip } = __req("ui/components.js");
 
 
 
@@ -8277,12 +8582,13 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
   const { publishFromEditor, publishDays, EDITOR_SOURCE } = __req("ui/rc_ingest.js");
   const { la } = __req("ui/rc_la_state.js");
   const { loadP6, openP6Picker, openP6Import, p6Words } = __req("ui/rc_la_p6.js");
+  const { E, META, fmt, legendInForce, ensureWindow } = __req("ui/rc_la_editor_state.js");
+  const { openExcelExport } = __req("ui/rc_la_export.js");
 
   /* ══════════════════════════════════════════════════════════════════════════
      State
      ═══════════════════════════════════════════════════════════════════════ */
 
-  const META = ed.FIELDS.length; // six activity columns, then the days
   const SAVE_BATCH = 400;
   const POLL_MS = 20000;
   /** While the bell is connected (`rc.lookaheadLive()`), a poll is only a check on it. */
@@ -8298,54 +8604,6 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
    * stopped to think. The edit log keeps the fine detail either way.
    */
   const PUBLISH_QUIET_MS = 120000;
-
-  /**
-   * The editor's state, kept for the life of the page so a redraw of the tab —
-   * which any calendar write causes — never loses the selection, the undo
-   * history or unsaved work.
-   */
-  const E = {
-    model: null,
-    loaded: null, // { from, to } — the days whose cells are in the model
-    legend: [], // shift colours only: what the palette paints with
-    legendAll: [],
-    codes: [],
-    title: '',
-    start: null, // the Monday the window starts on
-    weeks: 4,
-    firstWritten: null, // the first day anything is written here — the editor holds nothing before its week
-    filter: '',
-    showArchived: false,
-    collapsed: new Set(),
-    anchor: { r: 0, c: META },
-    focus: { r: 0, c: META },
-    undo: [],
-    redo: [],
-    queue: [],
-    saving: null, // the save under way, if any
-    status: 'saved', // saved | saving | retry | conflict
-    retryIn: 0,
-    server: new Map(), // 'row:<id>' | 'cell:<row>|<day>' → the version the server holds
-    revision: 0,
-    dirtySincePublish: false,
-    publishTimer: null,
-    publishing: null, // the publish under way, so a flush can wait for it
-    publishError: null, // why the last publish failed, so Done editing can say so
-    pollTimer: null,
-    clip: null,
-    editing: null,
-    root: null,
-    view: null, // what is drawn: { rows, days, cols }
-    // Who is on the team, for the staffing check: a lookup from a written name to
-    // a person, and the leave booked in the calendar across the loaded days.
-    resolveName: null,
-    leave: [],
-    leaveKinds: new Map(),
-    staff: { issues: [], byCell: new Map() },
-    scroll: { left: 0, top: 0 },
-    // The schedule's activities and the reasons a row has none (`loadP6()`).
-    p6: { available: false, entries: [], flags: [], index: p6.p6Index() },
-  };
 
   /* ══════════════════════════════════════════════════════════════════════════
      Entry
@@ -8411,17 +8669,6 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
     }
     draw();
     startPolling();
-  }
-
-  /** The legend as the editor paints with it: every row, and the shifts in force. */
-  function legendInForce(rows) {
-    const all = rows.map((r) => ({ argb: String(r.argb).toUpperCase(), meaning: r.meaning, role: r.role || 'shift', valid_from: r.valid_from }));
-    const inForce = new Map();
-    for (const r of all) {
-      const held = inForce.get(r.argb);
-      if (!held || String(r.valid_from || '') > String(held.valid_from || '')) inForce.set(r.argb, r);
-    }
-    return { all, shifts: [...inForce.values()].filter((r) => r.role === 'shift' && r.meaning) };
   }
 
   /**
@@ -8972,8 +9219,8 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
       iconButton('redo', 'Redo  (Ctrl+Y)', () => redo(), !E.redo.length),
       status,
       el('button', {
-        class: 'cx-btn mini primary', type: 'button', html: icon('download', { size: 12 }) + '<span>Export to Excel</span>',
-        onClick: () => openExport(),
+        class: 'cx-btn mini', type: 'button', html: icon('download', { size: 12 }) + '<span>Export to Excel</span>',
+        onClick: () => openExcelExport(),
       }),
       iconButton('settings', 'More', (e) => moreMenu(e)),
     ].filter(Boolean));
@@ -9062,11 +9309,6 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
       class: 'cx-btn mini ghost icon', type: 'button', 'aria-label': label, title: label,
       html: icon(name, { size: 14 }), disabled, onClick,
     });
-  }
-
-  function fmt(iso) {
-    const d = new Date(`${iso}T00:00:00Z`);
-    return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', timeZone: 'UTC' });
   }
 
   async function moveWindow(delta) {
@@ -11078,195 +11320,6 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
     });
   }
 
-  /* ── Export ────────────────────────────────────────────────────────────── */
-
-  function openExport() {
-    openExcelExport();
-  }
-
-  /**
-   * What an export is built from. The editor's own state when it is open — it
-   * holds exactly what was just typed — and otherwise the same rows and cells
-   * read afresh, so the calendar's read view offers the identical workbook
-   * without opening the editor, to anybody who can see the look-ahead.
-   */
-  async function exportSource() {
-    if (E.model) {
-      return { model: E.model, legend: E.legend, codes: E.codes, title: E.title, weeks: E.weeks, ensure: ensureWindow };
-    }
-    const [settings, legend, codes, rows] = await Promise.all([
-      rc.listSettings().catch(() => []),
-      rc.listLegend().catch(() => []),
-      rc.listSupportCodes({ includeRetired: true }).catch(() => []),
-      rc.listLaRows(),
-    ]);
-    const src = {
-      model: ed.makeModel(rows.map(ed.cleanRow), []),
-      legend: legendInForce(legend).shifts,
-      codes,
-      title: settings.find((r) => r.key === 'lookahead_title')?.value || '',
-      weeks: ed.WINDOW_WEEKS.includes(la.editorWeeks) ? la.editorWeeks : 4,
-      loaded: null,
-    };
-    src.ensure = async (days) => {
-      const from = days[0];
-      const to = days[days.length - 1];
-      if (src.loaded && from >= src.loaded.from && to <= src.loaded.to) return;
-      const cells = await rc.listLaCells(from, to);
-      src.model = ed.makeModel(rows.map(ed.cleanRow), cells.map(ed.cleanCell));
-      src.loaded = { from, to };
-    };
-    return src;
-  }
-
-  /**
-   * The 4WLA as an .xlsx, built without asking — names rows included — filed as
-   * `4WLA_Latest.xlsx` by the schedule in Export to Excel: every week written here, from the
-   * first day anything was (`laCellSpan()`) to the last, and never less than this
-   * week and the next three. `from` and `to` are the export's own dates, and
-   * narrow it; weeks nothing was ever written in are never drawn, however far
-   * back the dates reach. It used to be this week and the next three only, so
-   * the record of what the look-ahead said went out of the file as each week
-   * passed. Null until the look-ahead is written here: before that the workbook
-   * in the folder is the 4WLA, and the editor's tables would be an old copy of
-   * it — and null when the dates asked for hold nothing written.
-   */
-  async function lookaheadFileNow({ from = null, to = null } = {}) {
-    const settings = await rc.listSettings().catch(() => []);
-    const said = (key) => settings.find((r) => r.key === key)?.value;
-    if (said('lookahead_source') !== EDITOR_SOURCE) return null;
-    const span = await rc.laCellSpan().catch(() => ({ first: null, last: null }));
-    const thisMonday = ed.mondayOf(todayISO());
-    const first = [span.first, thisMonday].filter(Boolean).sort()[0];
-    const last = [span.last, ed.addDaysISO(thisMonday, 27)].filter(Boolean).sort().pop();
-    const start = ed.mondayOf(from && from > first ? from : first);
-    const end = to && to < last ? to : last;
-    if (end < start) return null;
-    const weeks = Math.floor((Date.parse(end) - Date.parse(start)) / (7 * 864e5)) + 1;
-    const days = ed.windowDays(start, weeks);
-    const src = await exportSource();
-    await src.ensure(days);
-    const sheetName = said('lookahead_sheet') || '4WLA';
-    const bytes = lookaheadWorkbook({
-      model: src.model, days, legend: src.legend, codes: src.codes.filter((c) => c.active !== false), title: src.title, sheetName,
-      resources: true,
-    });
-    return { bytes, name: lookaheadLatestName(sheetName), from: days[0], to: days[days.length - 1] };
-  }
-
-  // 4WLA_Latest.xlsx on a schedule is built here; that module files it.
-  provide4wla({ xlsx: () => lookaheadFileNow() });
-
-  /** The 4WLA as an .xlsx — from the editor, or from the calendar's read view. */
-  async function openExcelExport() {
-    let src;
-    try {
-      src = await exportSource();
-    } catch (err) {
-      toast({ tone: 'bad', message: err.message, timeout: 10000 });
-      rc.reportError('lookahead:export', err);
-      return;
-    }
-    const thisMonday = ed.mondayOf(todayISO());
-    const starts = [-7, 0, 7, 14].map((d) => ed.addDaysISO(thisMonday, d));
-    const start = selectInput({
-      value: thisMonday,
-      options: starts.map((d, i) => ({ value: d, label: `${['Last week', 'This week', 'Next week', 'In two weeks'][i]} — from ${fmt(d)}` })),
-    });
-    let weeks = src.weeks;
-    const size = segmented({
-      value: weeks,
-      options: ed.WINDOW_WEEKS.map((w) => ({ value: w, label: `${w} weeks` })),
-      onChange: (w) => { weeks = w; update(); },
-    });
-    const summary = el('div', { class: 'rc-hint' });
-    const update = async () => {
-      const days = ed.windowDays(start.value, weeks);
-      await src.ensure(days).catch(() => {});
-      const rows = ed.rowsWithWork(src.model, days);
-      const n = rows.filter((r) => r.kind === 'activity').length;
-      summary.textContent = `${n} activit${n === 1 ? 'y' : 'ies'} with work between ${fmt(days[0])} and ${fmt(days[days.length - 1])}, `
-        + (la.exportResources
-          ? 'with their sections, names rows and the PTO / Office / Other group rows'
-          : 'with their sections — no names rows, and no PTO / Office / Other group rows')
-        + ' — in the 4WLA layout, ready to copy into the master file.';
-    };
-    const resourcesBox = checkbox({
-      label: 'Show resources — names under each activity, and the PTO, Office and Other group / project rows',
-      checked: la.exportResources,
-      onChange: (on) => { la.exportResources = on; update(); },
-    });
-    resourcesBox.classList.add('lae-export-resources');
-    start.addEventListener('change', update);
-    await update();
-
-    const canFolder = filestore.hasFolder?.();
-    const build = async () => {
-      const days = ed.windowDays(start.value, weeks);
-      await src.ensure(days);
-      const settings = await rc.listSettings().catch(() => []);
-      const sheetName = settings.find((r) => r.key === 'lookahead_sheet')?.value || '4WLA';
-      const bytes = lookaheadWorkbook({
-        model: src.model, days, legend: src.legend, codes: src.codes.filter((c) => c.active !== false), title: src.title, sheetName,
-        resources: la.exportResources,
-      });
-      return { bytes, name: lookaheadFileName(days, sheetName) };
-    };
-    openModal({
-      title: 'Export to Excel',
-      subtitle: 'The same columns, merged headings and colours as the 4WLA',
-      body: el('div', { class: 'lae-form' }, [
-        el('label', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'Starting' }), start]),
-        el('div', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'Weeks' }), size]),
-        resourcesBox,
-        summary,
-        // The same 4WLA, filed as 4WLA_Latest on a schedule for sending on.
-        scheduleSection(),
-      ]),
-      actions: [
-        { label: 'Cancel' },
-        canFolder ? {
-          label: 'Save to the shared folder', onClick: async () => {
-            try {
-              const { bytes, name } = await build();
-              await filestore.intakeWrite(`lookahead/${name}`, bytes);
-              toast({ tone: 'good', title: 'Saved to the shared folder', message: `lookahead/${name}` });
-            } catch (err) {
-              toast({ tone: 'bad', message: err.message, timeout: 10000 });
-            }
-          },
-        } : null,
-        {
-          label: 'Download', kind: 'primary', autofocus: true, onClick: async () => {
-            try {
-              const { bytes, name } = await build();
-              saveFile(name, bytes, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'Look-ahead');
-            } catch (err) {
-              toast({ tone: 'bad', message: err.message, timeout: 10000 });
-              rc.reportError('lookahead:export', err);
-            }
-          },
-        },
-      ].filter(Boolean),
-    });
-  }
-
-  /** Make sure the cells of a window outside the one on screen are loaded. */
-  async function ensureWindow(days) {
-    const from = days[0];
-    const to = days[days.length - 1];
-    if (E.loaded && from >= E.loaded.from && to <= E.loaded.to) return;
-    const cells = await rc.listLaCells(from, to);
-    for (const c of cells.map(ed.cleanCell)) {
-      const key = ed.cellKey(c.row_id, c.day);
-      if (!E.model.cells.has(key)) {
-        E.model.cells.set(key, c);
-        E.server.set(`cell:${key}`, c.version || 0);
-      }
-    }
-    E.loaded = { from: [from, E.loaded?.from || from].sort()[0], to: [to, E.loaded?.to || to].sort().reverse()[0] };
-  }
-
   /* ══════════════════════════════════════════════════════════════════════════
      Saving, publishing and noticing the other editor
      ═══════════════════════════════════════════════════════════════════════ */
@@ -11467,8 +11520,6 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
 
   Object.defineProperty(__x, "renderEditor", { get: () => renderEditor, enumerable: true });
   Object.defineProperty(__x, "flushEditor", { get: () => flushEditor, enumerable: true });
-  Object.defineProperty(__x, "lookaheadFileNow", { get: () => lookaheadFileNow, enumerable: true });
-  Object.defineProperty(__x, "openExcelExport", { get: () => openExcelExport, enumerable: true });
 };
 
 // core/tawr.js
@@ -13667,7 +13718,7 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
     const span = `${dayLabel(from)} to ${dayLabel(last)}`;
     wrap.appendChild(el('div', { style: 'display:flex;gap:8px;align-items:center;margin:8px 0 10px;flex-wrap:wrap' }, [
       el('button', {
-        class: 'cx-btn mini primary la-cancel-xlsx',
+        class: 'cx-btn mini la-cancel-xlsx',
         type: 'button',
         html: `${icon('download', { size: 12 })}<span>Export to Excel</span>`,
         title: 'This calendar as an .xlsx: one row per activity, each cancelled run one cell with who and why',
@@ -14931,7 +14982,7 @@ __mods["ui/rc_master_export.js"] = function (__x, __req) {
   /** The button that opens it — the same everywhere it is offered. */
   function masterExportButton() {
     return el('button', {
-      class: 'cx-btn mini primary rc-master-export',
+      class: 'cx-btn mini rc-master-export',
       type: 'button',
       html: icon('download', { size: 12 }) + '<span>Master export</span>',
       title: 'Everything useful the calendar holds, as one Excel workbook — now, or on a schedule',
@@ -14988,7 +15039,8 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
 
   const { la, WEEK_CHOICES } = __req("ui/rc_la_state.js");
   const { checkNowButton, lookaheadSource, EDITOR_SOURCE, writtenView } = __req("ui/rc_ingest.js");
-  const { renderEditor, flushEditor, openExcelExport } = __req("ui/rc_la_editor.js");
+  const { renderEditor, flushEditor } = __req("ui/rc_la_editor.js");
+  const { openExcelExport } = __req("ui/rc_la_export.js");
   const { renderLegend } = __req("ui/rc_la_legend.js");
   const { renderChanges, renderSnapshots } = __req("ui/rc_la_changes.js");
   const { renderCancellations } = __req("ui/rc_la_cancellations.js");
@@ -15403,7 +15455,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
          Only once the look-ahead is written here — before that, the workbook in
          the folder is the file, and the editor's tables would be an old copy. */
       written ? el('button', {
-        class: 'cx-btn mini primary la-export-xlsx',
+        class: 'cx-btn mini la-export-xlsx',
         type: 'button',
         html: icon('download', { size: 12 }) + '<span>Export to Excel</span>',
         title: 'The look-ahead as an .xlsx in the 4WLA layout — the same export as in Edit.',
@@ -16316,9 +16368,12 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
   // The schedule in Export to Excel files them; that module is imported here, so it is handed over.
   provide4wla({ sheets: lookaheadSheetsNow });
 
+  /* The exports are plain buttons. Red is for the one thing the page is for —
+     Check now, or Edit the look-ahead once the calendar writes it — and three
+     red buttons in one toolbar left nothing standing out. */
   function exportButton(context) {
     return el('button', {
-      class: 'cx-btn mini primary la-export-pdf',
+      class: 'cx-btn mini la-export-pdf',
       type: 'button',
       html: icon('download', { size: 12 }) + '<span>Export PDF</span>',
       title: 'Draw this calendar on one page — weeks, names and paper size are all choices.',
@@ -17872,6 +17927,38 @@ __mods["ui/rc_tawr.js"] = function (__x, __req) {
     return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
   }
 
+  /** One day's hours as the card says them: "0700–1900", "2200–0600 (shift hours)", or "no hours". */
+  function hoursLabel(d) {
+    if (!d.start && !d.end) return 'no hours';
+    return `${d.start || '?'}–${d.end || '?'}${d.fromShift ? ' (shift hours)' : ''}`;
+  }
+
+  /**
+   * The days of a request, a run of days with the same hours said once:
+   * "Mon 12 – Sun 18 Oct: 2200–0600 (shift hours)". Spelt out a day at a time,
+   * a week of unknown hours was "?–? (shift hours)" seven times over.
+   */
+  function daysLine(days) {
+    const sorted = [...days].sort((a, b) => String(a.date).localeCompare(String(b.date)));
+    const runs = [];
+    for (const d of sorted) {
+      const hours = hoursLabel(d);
+      const last = runs[runs.length - 1];
+      const next = last && utc(last.to).getTime() + 86400000 === utc(d.date).getTime();
+      if (last && next && last.hours === hours) last.to = d.date;
+      else runs.push({ from: d.date, to: d.date, hours });
+    }
+    return runs.map(({ from, to, hours }) => {
+      if (from === to) return `${dayLabel(from)}: ${hours}`;
+      const a = utc(from);
+      const b = utc(to);
+      const span = a.getUTCMonth() === b.getUTCMonth()
+        ? `${WEEKDAYS[a.getUTCDay()]} ${a.getUTCDate()} – ${dayLabel(to)}`
+        : `${dayLabel(from)} – ${dayLabel(to)}`;
+      return `${span}: ${hours}`;
+    }).join(' · ');
+  }
+
   const state = { section: 'requests', week: null };
 
   /* ── BART's blank form, once per session ───────────────────────────────── */
@@ -18136,7 +18223,7 @@ __mods["ui/rc_tawr.js"] = function (__x, __req) {
 
     node.appendChild(el('dl', { class: 'rc-tawr-facts' }, [
       el('dt', { text: 'Days' }),
-      el('dd', { text: days.map((d) => `${dayLabel(d.date)} ${d.start || '?'}–${d.end || '?'}${d.fromShift ? ' (shift hours)' : ''}`).join(' · ') || '—' }),
+      el('dd', { text: daysLine(days) || '—' }),
       el('dt', { text: 'Work' }),
       el('dd', { text: activities.map((a) => a.title).join(' · ') || '—' }),
       el('dt', { text: 'BART support' }),

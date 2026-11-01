@@ -3,7 +3,7 @@
  *
  * GENERATED FILE — do not edit by hand.
  * Built from the ES modules in src/ by tools/build.js (`npm run build`).
- * Modules: 60   Built: 2026-11-01T15:03:50.243Z
+ * Modules: 60   Built: 2026-11-01T16:26:46.032Z
  */
 (function () {
   'use strict';
@@ -876,14 +876,24 @@ __mods["core/dates.js"] = function (__x, __req) {
     }
   }
 
-  /** Human duration from a day count: "3d", "2w 1d", "4mo". */
-  function fmtDuration(days) {
+  /**
+   * Human duration from a day count: "3d", "2w 1d", "4mo".
+   *
+   * A *duration* is counted the project's way, so on a working-day project a
+   * week is five of them. A distance between two dates — overdue by, starts in —
+   * is calendar days whatever the project counts, and says so with `calendar`:
+   * read on a five-day week, thirty days overdue came out as "6w".
+   *
+   * @param {number} days
+   * @param {{ calendar?: boolean }} [options]
+   */
+  function fmtDuration(days, { calendar = false } = {}) {
     const n = Math.abs(Math.round(days));
     const sign = days < 0 ? '−' : '';
     // A week is five days when durations are counted in working days, so ten of
     // them read as "2w" rather than "1w 3d". Pushed in by the store, like the
     // date order: this module is a leaf and cannot read a setting for itself.
-    const week = workWeek;
+    const week = calendar ? 7 : workWeek;
     const month = week * 4.348;
     const year = week * 52.18;
 
@@ -18486,7 +18496,7 @@ __mods["ui/components.js"] = function (__x, __req) {
     search.addEventListener('input', () => render(search.value));
     render('');
 
-    return el('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px' } }, [
+    return el('div', { class: 'cx-stack tight' }, [
       search,
       grid,
       el('button', { class: 'cx-btn mini', text: 'No icon', onClick: () => onPick('') }),
@@ -18535,7 +18545,7 @@ __mods["ui/components.js"] = function (__x, __req) {
       html: icon('palette', { size: 13 }),
     });
     more.addEventListener('click', () => {
-      popover(more, el('div', { style: { display: 'flex', flexDirection: 'column', gap: '9px' } }, [
+      popover(more, el('div', { class: 'cx-stack tight' }, [
         el('div', { class: 'cx-label', text: 'Palette' }),
         swatchGrid({ value, onPick: (c) => { swatch.value = c; onChange(c); closePopover(); } }),
         allowInherit
@@ -20256,7 +20266,7 @@ __mods["ui/commands.js"] = function (__x, __req) {
       }
       const lanes = new Map(store.getDoc().lanes.map((l) => [l.id, l.name]));
       for (const obj of hidden) {
-        list.appendChild(el('div', { class: 'cx-listrow', dataset: { id: obj.id }, style: { cursor: 'default' } }, [
+        list.appendChild(el('div', { class: 'cx-listrow static', dataset: { id: obj.id } }, [
           el('div', { class: 'lr-main' }, [
             el('div', { class: 'lr-title', text: obj.title }),
             el('div', { class: 'lr-meta', text: `${lanes.get(obj.lane) || 'no lane'} · ${fmtDate(obj.start, 'numeric')}` }),
@@ -21131,7 +21141,7 @@ __mods["ui/p6.js"] = function (__x, __req) {
       ]);
 
     return el('div', { style: { marginBottom: '12px' } }, [
-      el('div', { style: { display: 'flex', gap: '6px', flexWrap: 'wrap', marginBottom: '9px' } }, [
+      el('div', { class: 'cx-btn-row' }, [
         el('button', {
           class: 'cx-btn mini primary',
           html: icon('upload', { size: 12 }) + '<span>Import from P6</span>',
@@ -21248,7 +21258,7 @@ __mods["ui/p6.js"] = function (__x, __req) {
         el('div', { style: { marginTop: '11px' } }, [
           el('div', { class: 'cx-section-label', text: 'First rows' }),
           el('div', { class: 'cx-list' }, sample.map((a) =>
-            el('div', { class: 'cx-listrow', style: { cursor: 'default' } }, [
+            el('div', { class: 'cx-listrow static' }, [
               el('div', { class: 'lr-main' }, [
                 el('div', { class: 'lr-title', text: a.name }),
                 el('div', { class: 'lr-meta', text: `${a.id} · ${fmtDate(a.dates.start, 'medium')} → ${fmtDate(a.dates.end, 'medium')}` }),
@@ -21260,7 +21270,7 @@ __mods["ui/p6.js"] = function (__x, __req) {
 
     }
 
-    const body = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '13px' } }, [
+    const body = el('div', { class: 'cx-stack' }, [
       field('This import is', segmented({
         value: kind,
         stretch: true,
@@ -21333,7 +21343,7 @@ __mods["ui/p6.js"] = function (__x, __req) {
 
     for (const item of affected) {
       rows.appendChild(
-        el('div', { class: 'cx-listrow', style: { cursor: 'default' } }, [
+        el('div', { class: 'cx-listrow static' }, [
           checkbox({
             label: '',
             checked: false,
@@ -22526,7 +22536,7 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
     const calendar = calendarAvailable();
     return el('div', { style: { marginBottom: '12px' } }, [
       calendar ? calendarNotice(register) : null,
-      el('div', { style: { display: 'flex', gap: '6px', flexWrap: 'wrap', marginBottom: '9px' } }, [
+      el('div', { class: 'cx-btn-row' }, [
         calendar
           ? el('button', {
               class: 'cx-btn mini primary',
@@ -22720,7 +22730,7 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
       const entry = store.getLookaheadActivity(item.id);
       if (!entry) continue;
       rows.appendChild(
-        el('div', { class: 'cx-listrow', style: { cursor: 'default' } }, [
+        el('div', { class: 'cx-listrow static' }, [
           checkbox({ label: '', checked: false, onChange: (v) => (v ? chosen.add(item.id) : chosen.delete(item.id)) }),
           el('div', { class: 'lr-main' }, [
             el('div', { class: 'lr-title', text: entry.title }),
@@ -22770,7 +22780,7 @@ __mods["ui/lookahead.js"] = function (__x, __req) {
       counts[state]++;
       if (state === 'placed' && entry.previous) moved++;
     }
-    return el('div', { class: 'cx-chipstats', style: { marginBottom: '11px' } }, [
+    return el('div', { class: 'cx-chipstats spaced' }, [
       chipStat('Suggested', counts.suggested, counts.suggested ? 'info' : 'muted'),
       chipStat('On timeline', counts.placed, counts.placed ? 'good' : 'muted'),
       moved ? chipStat('Moved', moved, 'warn') : null,
@@ -25747,7 +25757,7 @@ __mods["ui/lists.js"] = function (__x, __req) {
     let color = '#5b93f5';
     let tone = 'neutral';
 
-    const body = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '13px' } }, [
+    const body = el('div', { class: 'cx-stack' }, [
       field('Name', labelInput),
       def.color ? field('Colour', colorControl({ value: color, onChange: (v) => { color = v; } })) : null,
       def.tone
@@ -26007,7 +26017,7 @@ __mods["ui/lists.js"] = function (__x, __req) {
       let settled = false;
       openModal({
         title: `Remove "${option.label}"`,
-        body: el('div', { style: { display: 'flex', flexDirection: 'column', gap: '13px' } }, [
+        body: el('div', { class: 'cx-stack' }, [
           el('div', { style: { fontSize: 'var(--fs-small)', color: 'var(--text-muted)' }, text: `${usage} object${usage === 1 ? '' : 's'} currently use this ${def.label.toLowerCase()}.` }),
           field('Move them to', selectInput({
             value: '',
@@ -26576,7 +26586,7 @@ __mods["ui/attachments.js"] = function (__x, __req) {
    * Supports click-to-pick and drag-and-drop.
    */
   function attachmentList(objectId, { onChange = null } = {}) {
-    const root = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px' } });
+    const root = el('div', { class: 'cx-stack tight' });
     const list = el('div', { class: 'att-list' });
 
     const drop = el('div', {
@@ -27012,7 +27022,7 @@ __mods["ui/dialogs.js"] = function (__x, __req) {
         if (!other) continue;
         list.appendChild(
           el('div', { class: 'cx-listrow' }, [
-            el('span', { style: { display: 'flex', color: 'var(--text-subtle)' }, html: icon(outgoing ? 'arrow' : 'arrow-left', { size: 12 }) }),
+            el('span', { class: 'lr-icon', html: icon(outgoing ? 'arrow' : 'arrow-left', { size: 12 }) }),
             el('div', { class: 'lr-main' }, [
               el('div', { class: 'lr-title', text: other.title }),
               el('div', { class: 'lr-meta', text: `${link.type}${link.lag ? ` ${link.lag > 0 ? '+' : ''}${link.lag}d` : ''} · ${fmtDate(other.start, 'medium')}` }),
@@ -27066,7 +27076,7 @@ __mods["ui/dialogs.js"] = function (__x, __req) {
 
     openModal({
       title: `Lane — ${lane.name}`,
-      body: el('div', { style: { display: 'flex', flexDirection: 'column', gap: '13px' } }, [
+      body: el('div', { class: 'cx-stack' }, [
         field('Name', textInput({ value: lane.name, onInput: (v) => set({ name: v }, 'Rename lane') })),
         field('Description', textInput({ value: lane.description, placeholder: 'Optional', onInput: (v) => set({ description: v }, 'Edit lane description') })),
         el('div', { class: 'cx-row' }, [
@@ -27319,7 +27329,7 @@ __mods["ui/pane_plan.js"] = function (__x, __req) {
     for (const r of releases) counts[r.status] = (counts[r.status] || 0) + 1;
 
     root.appendChild(
-      el('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '5px', marginBottom: '10px' } },
+      el('div', { class: 'cx-chipstats spaced' },
         Object.entries(counts).map(([status, n]) => chipStat(statusOf(status).label, n, toneOf(status))))
     );
 
@@ -27447,7 +27457,7 @@ __mods["ui/pane_plan.js"] = function (__x, __req) {
     const violations = linkViolations(doc);
 
     root.appendChild(
-      el('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '5px', marginBottom: '10px' } }, [
+      el('div', { class: 'cx-chipstats spaced' }, [
         chipStat('Links', doc.links.length, 'info'),
         chipStat('Broken', violations.count, violations.count ? 'bad' : 'good'),
         chipStat('Critical', analysis.critical.size, analysis.critical.size ? 'warn' : 'muted'),
@@ -27471,7 +27481,7 @@ __mods["ui/pane_plan.js"] = function (__x, __req) {
     }
 
     root.appendChild(
-      el('div', { style: { display: 'flex', flexDirection: 'column', gap: '9px', marginBottom: '12px' } }, [
+      el('div', { class: 'cx-stack tight', style: { marginBottom: '12px' } }, [
         field('Connector style', segmented({
           value: doc.settings.connectorStyle,
           stretch: true,
@@ -27562,7 +27572,7 @@ __mods["ui/pane_plan.js"] = function (__x, __req) {
     const active_ = store.activeBaseline();
 
     root.appendChild(
-      el('div', { style: { display: 'flex', gap: '6px', marginBottom: '11px' } }, [
+      el('div', { class: 'cx-btn-row' }, [
         el('button', { class: 'cx-btn mini primary', html: icon('bookmark', { size: 12 }) + '<span>Take baseline</span>', onClick: () => cmd.takeBaseline() }),
         el('button', {
           class: 'cx-btn mini',
@@ -27595,7 +27605,7 @@ __mods["ui/pane_plan.js"] = function (__x, __req) {
             refreshPane();
           },
         }, [
-          el('span', { style: { display: 'flex', color: 'var(--text-subtle)' }, html: icon('bookmark', { size: 12 }) }),
+          el('span', { class: 'lr-icon', html: icon('bookmark', { size: 12 }) }),
           el('div', { class: 'lr-main' }, [
             el('div', { class: 'lr-title', text: baseline.name }),
             el('div', { class: 'lr-meta', text: isDerivedBaseline(baseline)
@@ -27704,7 +27714,7 @@ __mods["ui/pane_plan.js"] = function (__x, __req) {
     const stats = summarise(doc);
 
     root.appendChild(
-      el('div', { style: { display: 'flex', flexDirection: 'column', gap: '9px', marginBottom: '12px' } }, [
+      el('div', { class: 'cx-stack tight', style: { marginBottom: '12px' } }, [
         toggle({
           label: 'Show legend on the canvas',
           checked: doc.settings.showLegend,
@@ -27767,7 +27777,7 @@ __mods["ui/pane_plan.js"] = function (__x, __req) {
     const state = store.historyState();
 
     root.appendChild(
-      el('div', { style: { display: 'flex', gap: '6px', marginBottom: '11px' } }, [
+      el('div', { class: 'cx-btn-row' }, [
         el('button', { class: 'cx-btn mini', html: icon('undo', { size: 12 }) + '<span>Undo</span>', disabled: !state.canUndo, onClick: () => { store.undo(); renderer.requestRender(); } }),
         el('button', { class: 'cx-btn mini', html: icon('redo', { size: 12 }) + '<span>Redo</span>', disabled: !state.canRedo, onClick: () => { store.redo(); renderer.requestRender(); } }),
       ])
@@ -27797,7 +27807,7 @@ __mods["ui/pane_plan.js"] = function (__x, __req) {
             }
           },
         }, [
-          el('span', { style: { display: 'flex', color: 'var(--text-subtle)' }, html: icon('history', { size: 11 }) }),
+          el('span', { class: 'lr-icon', html: icon('history', { size: 11 }) }),
           el('div', { class: 'lr-main' }, [
             el('div', { class: 'lr-title', text: entry.label }),
             el('div', { class: 'lr-meta', text: `${fmtTimestamp(entry.time)} · ${entry.summary}` }),
@@ -27911,7 +27921,7 @@ __mods["ui/pane_filters.js"] = function (__x, __req) {
     const filters = store.getFilters();
 
     root.appendChild(
-      el('div', { style: { display: 'flex', gap: '6px', marginBottom: '11px' } }, [
+      el('div', { class: 'cx-btn-row' }, [
         el('button', {
           class: 'cx-btn mini',
           html: icon('refresh', { size: 12 }) + '<span>Clear all</span>',
@@ -28003,7 +28013,7 @@ __mods["ui/pane_filters.js"] = function (__x, __req) {
     const hidden = doc.objects.filter((o) => o.hidden);
     if (hidden.length) {
       root.appendChild(section(`Hidden objects (${hidden.length})`, [
-        el('div', { class: 'cx-list' }, hidden.map((obj) => el('div', { class: 'cx-listrow', style: { cursor: 'default' } }, [
+        el('div', { class: 'cx-list' }, hidden.map((obj) => el('div', { class: 'cx-listrow static' }, [
           el('div', { class: 'lr-main' }, [
             el('div', { class: 'lr-title', text: obj.title }),
             el('div', { class: 'lr-meta', text: fmtDate(obj.start, 'numeric') }),
@@ -28132,8 +28142,7 @@ __mods["ui/pane_io.js"] = function (__x, __req) {
     const rows = [];
     const wideBtn = (label, iconName, onClick, primary = false) =>
       el('button', {
-        class: 'cx-btn mini' + (primary ? ' primary' : ''),
-        style: { justifyContent: 'flex-start', width: '100%' },
+        class: 'cx-btn mini wide' + (primary ? ' primary' : ''),
         html: icon(iconName, { size: 12 }) + `<span>${label}</span>`,
         onClick,
       });
@@ -28234,8 +28243,8 @@ __mods["ui/pane_io.js"] = function (__x, __req) {
           if (!stored) return;
           reconnect.appendChild(
             el('button', {
-              class: 'cx-btn mini',
-              style: { justifyContent: 'flex-start', width: '100%', marginTop: '6px' },
+              class: 'cx-btn mini wide',
+              style: { marginTop: '6px' },
               html: icon('refresh', { size: 12 }) + `<span>Reconnect to ${stored.folder}</span>`,
               onClick: () => cmd.reconnectFolder(),
             })
@@ -28255,8 +28264,8 @@ __mods["ui/pane_io.js"] = function (__x, __req) {
       section('Export', [
         el('div', { class: 'cx-hint', text: 'PDF, print, SVG, PNG and JPEG all draw the same picture. What goes in it is up to you.' }),
         el('button', {
-          class: 'cx-btn mini',
-          style: { justifyContent: 'flex-start', width: '100%', marginBottom: '4px' },
+          class: 'cx-btn mini wide',
+          style: { marginBottom: '4px' },
           html: icon('sliders', { size: 12 }) + '<span>Drawing options…</span>',
           onClick: () => openExportOptions(() => refreshPane()),
         }),
@@ -28276,8 +28285,7 @@ __mods["ui/pane_io.js"] = function (__x, __req) {
       section('Import', [
         el('div', { class: 'cx-hint', text: 'JSON restores a whole project. CSV, TSV and Excel files are mapped by column name — Microsoft Project CSV exports are recognised automatically.' }),
         el('button', {
-          class: 'cx-btn mini',
-          style: { justifyContent: 'flex-start', width: '100%' },
+          class: 'cx-btn mini wide',
           html: icon('upload', { size: 12 }) + '<span>Choose a file…</span>',
           onClick: chooseImport,
         }),
@@ -28302,16 +28310,15 @@ __mods["ui/pane_io.js"] = function (__x, __req) {
 
     root.appendChild(
       section('Project', [
-        el('button', { class: 'cx-btn mini', style: { justifyContent: 'flex-start', width: '100%' }, html: icon('plus', { size: 12 }) + '<span>New project…</span>', onClick: () => cmd.newProject() }),
-        el('button', { class: 'cx-btn mini', style: { justifyContent: 'flex-start', width: '100%' }, html: icon('save', { size: 12 }) + '<span>Save a restore point</span>', onClick: () => cmd.saveSnapshot() }),
+        el('button', { class: 'cx-btn mini wide', html: icon('plus', { size: 12 }) + '<span>New project…</span>', onClick: () => cmd.newProject() }),
+        el('button', { class: 'cx-btn mini wide', html: icon('save', { size: 12 }) + '<span>Save a restore point</span>', onClick: () => cmd.saveSnapshot() }),
       ])
     );
   }
 
   function exportButton(label, iconName, onClick) {
     return el('button', {
-      class: 'cx-btn mini',
-      style: { justifyContent: 'flex-start', width: '100%' },
+      class: 'cx-btn mini wide',
       html: icon(iconName, { size: 12 }) + `<span>${label}</span>`,
       onClick,
     });
@@ -28346,7 +28353,7 @@ __mods["ui/pane_io.js"] = function (__x, __req) {
     openModal({
       title: 'Export PDF',
       subtitle: 'Vector output — text stays selectable and the drawing stays sharp at any zoom.',
-      body: el('div', { style: { display: 'flex', flexDirection: 'column', gap: '13px' } }, [
+      body: el('div', { class: 'cx-stack' }, [
         field('Page size', selectInput({
           value: pageSize,
           options: exporters.PDF_PAGE_SIZES,
@@ -28394,7 +28401,7 @@ __mods["ui/pane_io.js"] = function (__x, __req) {
     if (result.kind === 'error') {
       openModal({
         title: 'Import failed',
-        body: el('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px' } }, [
+        body: el('div', { class: 'cx-stack tight' }, [
           el('div', { class: 'cx-hint', text: `${file.name} could not be imported.` }),
           ...result.errors.map((e) => el('div', { style: { color: 'var(--bad)', fontSize: 'var(--fs-small)' }, text: e })),
         ]),
@@ -28626,7 +28633,7 @@ __mods["ui/pane_backups.js"] = function (__x, __req) {
 
   function paneBackups(root) {
     root.appendChild(
-      el('div', { style: { display: 'flex', gap: '6px', marginBottom: '11px' } }, [
+      el('div', { class: 'cx-btn-row' }, [
         el('button', {
           class: 'cx-btn mini primary',
           html: icon('save', { size: 12 }) + '<span>Back up now</span>',
@@ -28657,7 +28664,7 @@ __mods["ui/pane_backups.js"] = function (__x, __req) {
       for (const backup of backups) {
         list.appendChild(
           el('div', { class: 'cx-listrow' }, [
-            el('span', { style: { display: 'flex', color: 'var(--text-subtle)' }, html: icon('save', { size: 11 }) }),
+            el('span', { class: 'lr-icon', html: icon('save', { size: 11 }) }),
             el('div', { class: 'lr-main' }, [
               el('div', { class: 'lr-title', text: backup.name || 'Project' }),
               el('div', { class: 'lr-meta', text: `${fmtTimestamp(backup.time)} · ${backup.objects} objects · ${backup.reason}${backup.size ? ' · ' + bytes(backup.size) : ''}` }),
@@ -30450,26 +30457,28 @@ __mods["ui/inspector.js"] = function (__x, __req) {
       }
     }
 
-    return el('div', { style: { padding: '11px 12px', borderBottom: '1px solid var(--border)', display: 'flex', flexWrap: 'wrap', gap: '6px' } }, [
+    return el('div', { class: 'ih-health' }, [
       ...chips,
-      el('div', { class: 'cx-hint', style: { width: '100%', marginTop: '2px' }, text: healthMessage(health) }),
+      el('div', { class: 'cx-hint', text: healthMessage(health) }),
     ]);
   }
 
   function healthMessage(health) {
+    // `health.days` is the calendar distance to a date, not a duration.
+    const span = (days) => fmtDuration(days || 0, { calendar: true });
     switch (health.state) {
-      case 'overdue': return `Overdue by ${fmtDuration(health.days || 0)} — finish date has passed.`;
+      case 'overdue': return `Overdue by ${span(health.days)} — finish date has passed.`;
       case 'behind': return `${Math.abs(health.variance)}% behind the straight-line plan (${health.expected}% expected).`;
       case 'ahead': return `${health.variance}% ahead of the straight-line plan.`;
       case 'ontrack': return `Tracking to plan (${health.expected}% expected, ${health.actual}% reported).`;
       case 'done': return 'Complete.';
-      case 'late': return `Planned date passed ${fmtDuration(health.days || 0)} ago.`;
+      case 'late': return `Planned date passed ${span(health.days)} ago.`;
       /* Before its start date — but the work may have begun early, and saying
          "not started" over 45% done contradicted the chips just above. */
       case 'future':
         if (!health.days) return 'Due today.';
-        if (health.label === 'Upcoming') return `Due in ${fmtDuration(health.days)}.`;
-        return `Planned to start in ${fmtDuration(health.days)}`
+        if (health.label === 'Upcoming') return `Due in ${span(health.days)}.`;
+        return `Planned to start in ${span(health.days)}`
           + (health.actual > 0 ? ` — ${health.actual}% already reported.` : '.');
       default: return 'Not started yet.';
     }
@@ -30598,8 +30607,7 @@ __mods["ui/inspector.js"] = function (__x, __req) {
             onChange: (v) => set(obj.id, { end: endForDuration(obj.start, v) }, 'Change duration'),
           })),
           field('Remaining', el('div', {
-            class: 'cx-input',
-            style: { display: 'flex', alignItems: 'center', color: 'var(--text-muted)', cursor: 'default' },
+            class: 'cx-input readout',
             text: fmtDuration(remainingDays(obj)),
           })),
         ])
@@ -31152,8 +31160,7 @@ __mods["ui/inspector.js"] = function (__x, __req) {
 
     out.push(
       el('button', {
-        class: 'cx-btn mini',
-        style: { justifyContent: 'flex-start', width: '100%' },
+        class: 'cx-btn mini wide',
         html: icon('search', { size: 12 }) + '<span>Add a P6 activity…</span>',
         onClick: () => openActivityPicker(obj, register, linked),
       })
@@ -31301,7 +31308,7 @@ __mods["ui/inspector.js"] = function (__x, __req) {
 
 
     bodyEl.append(
-      el('div', { style: { padding: '11px 12px', borderBottom: '1px solid var(--border)', display: 'flex', flexWrap: 'wrap', gap: '6px' } }, [
+      el('div', { class: 'ih-health' }, [
         chipStat('Objects', objects.length, 'info'),
         chipStat('Lanes', new Set(objects.map((o) => o.lane)).size, 'muted'),
         chipStat('Types', new Set(objects.map((o) => o.type)).size, 'muted'),
@@ -32627,12 +32634,16 @@ __mods["ui/canvas_hint.js"] = function (__x, __req) {
    * objects were packed) rather than working out visibility for itself, so it
    * cannot disagree with what is on screen.
    *
-   * Imports: util, events, store, icons, commands, pane_util.
+   * A reader without the pen is told who has the plan rather than offered an
+   * Add that the store would refuse.
+   *
+   * Imports: util, events, store, filestore, icons, commands, pane_util.
    */
 
   const { el } = __req("core/util.js");
   const { on, EV } = __req("core/events.js");
   const store = __req("core/store.js");
+  const filestore = __req("core/filestore.js");
   const { icon } = __req("ui/icons.js");
   const cmd = __req("ui/commands.js");
   const { goToPane } = __req("ui/pane_util.js");
@@ -32640,11 +32651,17 @@ __mods["ui/canvas_hint.js"] = function (__x, __req) {
 
   let box = null;
   let shown = '';
+  /** How many objects the last render laid out — the pen can change without a render. */
+  let lastLaidOut = 0;
 
   function installCanvasHint(frame) {
     box = el('div', { class: 'canvas-hint', hidden: true, role: 'status' });
     frame.appendChild(box);
-    on(EV.RENDER_DONE, (/** @type {{ objects?: number }} */ { objects } = {}) => update(objects));
+    on(EV.RENDER_DONE, (/** @type {{ objects?: number }} */ { objects } = {}) => {
+      lastLaidOut = objects ?? 0;
+      update(lastLaidOut);
+    });
+    on(EV.FILE_STATE, () => update(lastLaidOut));
   }
 
   function action(label, iconName, run, primary = false) {
@@ -32675,12 +32692,22 @@ __mods["ui/canvas_hint.js"] = function (__x, __req) {
     const actions = [];
 
     if (!doc.objects.length) {
-      key = `empty:${doc.lanes.length}`;
+      const readOnly = store.isDocReadOnly();
+      const holder = readOnly ? filestore.state().holder || '' : '';
+      key = `empty:${doc.lanes.length}:${readOnly}:${holder}`;
       title = 'An empty plan';
-      message = 'Add the first activity, or bring a plan in from a file or a P6 export.';
-      if (doc.lanes.length) actions.push(action('Add an activity', 'plus', () => cmd.createObject('activity'), true));
-      else actions.push(action('Add a lane', 'layers', () => cmd.addLane(), true));
-      actions.push(action('Import…', 'upload', () => goToPane('io')));
+      if (readOnly) {
+        // Nothing to offer: every Add would be refused. The read-only bar above
+        // is where the pen is asked for or taken.
+        message = holder
+          ? `Nothing has been added to this plan yet. ${holder} has it open, so it can be read here but not edited.`
+          : 'Nothing has been added to this plan yet, and it cannot be edited here.';
+      } else {
+        message = 'Add the first activity, or bring a plan in from a file or a P6 export.';
+        if (doc.lanes.length) actions.push(action('Add an activity', 'plus', () => cmd.createObject('activity'), true));
+        else actions.push(action('Add a lane', 'layers', () => cmd.addLane(), true));
+        actions.push(action('Import…', 'upload', () => goToPane('io')));
+      }
     } else {
       key = `hidden:${windowSet}:${hidden}:${filtering}`;
       title = 'Nothing in view';

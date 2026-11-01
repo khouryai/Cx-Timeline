@@ -15,9 +15,10 @@
  * — the same rule as the master export's, with settings of its own, because
  * the two go to different people at different times.
  *
- * What is drawn comes from the screens that draw it — the workbook from the
- * editor (`lookaheadFileNow()`), the PDF and PNG from the look-ahead
- * (`lookaheadSheetsNow()`). Both import this module for the dialog, so they
+ * What is drawn comes from the screens that draw it — the workbook from Export
+ * to Excel (`lookaheadFileNow()`, `ui/rc_la_export.js`), the PDF and PNG from
+ * the look-ahead (`lookaheadSheetsNow()`). Both import this module for the
+ * dialog, so they
  * hand their builders over (`provide4wla()`) rather than being imported back,
  * which the build would refuse as a cycle.
  *

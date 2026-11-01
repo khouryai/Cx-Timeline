@@ -812,7 +812,7 @@ export function openMasterExport() {
 /** The button that opens it — the same everywhere it is offered. */
 export function masterExportButton() {
   return el('button', {
-    class: 'cx-btn mini primary rc-master-export',
+    class: 'cx-btn mini rc-master-export',
     type: 'button',
     html: icon('download', { size: 12 }) + '<span>Master export</span>',
     title: 'Everything useful the calendar holds, as one Excel workbook — now, or on a schedule',

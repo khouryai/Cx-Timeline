@@ -10,12 +10,13 @@ whether it is.
 OneDrive folder (*The calendar is files in the folder*, below), the
 application ships only as the desktop build, and the huddle, the week plan,
 My day, Reports, the inbox, SARs, accounts, the phone app and the website were
-removed (`docs/PLAN_ONEDRIVE_ONLY.md`). Sections further down that explain a
-Postgres policy, an invitation, the phone or one of those screens are kept as
-the record of why the calendar's rules are what they are — a rule that
-survived (an approved TAWR is final, a cancellation is the newest reading's)
-is now enforced in `core/rc_db.js` instead. Where they disagree with
-`CLAUDE.md`, `CLAUDE.md` is current.
+removed (`docs/PLAN_ONEDRIVE_ONLY.md`). The sections that explained a Postgres
+policy, an invitation, the phone or one of those screens are kept, together,
+under [Retired](#retired) at the end — the record of why the calendar's rules
+are what they are. A rule that survived (an approved TAWR is final, a
+cancellation is the newest reading's) is now enforced in `core/rc_db.js`, and
+everything above that heading describes the application as it is. Where
+anything here disagrees with `CLAUDE.md`, `CLAUDE.md` is current.
 
 ## Conventions
 
@@ -510,6 +511,12 @@ never downloaded; the user is told to install the new one from GitHub
 Releases, and the copy they have keeps working. Raise `SHELL` whenever a
 command is added.
 
+The kit carries the bundles as they are built, not minified. Minifying was
+measured (November 2026, the sample plan, the CPU slowed fourfold, seven cold
+starts each): 1.43 MB became 0.59 MB, and the first object on the canvas came
+about 50 ms sooner — 831 ms against 879, inside the spread between runs. That
+is not worth a stack trace from somebody's laptop that nobody can read.
+
 ### The desktop app zooms the page as a browser does
 
 A browser zooms with Ctrl + / Ctrl − and Ctrl + wheel; the desktop window had
@@ -524,7 +531,6 @@ It needs the `core:webview:allow-set-webview-zoom` permission in
 `src-tauri/capabilities/default.json`, so it reaches an installed copy only with
 a rebuilt installer; an older shell refuses the call and the control is simply
 not shown.
-
 
 ### A download is the one action with no visible result, so it says so
 
@@ -566,21 +572,6 @@ numbers computed in the database, and the newest grid is fetched on its own by
 `latestSnapshot()`. A caller reaching for `listSnapshots()` with a limit above
 one is reading the wrong thing.
 
-### Reads are remembered for thirty seconds and forgotten on every write
-
-**Reads are remembered for thirty seconds and forgotten on every write.**
-`select()` in `core/rc.js` keys a read on the table, the columns and the
-filters the query built — captured through a proxy, because neither the
-client's builder nor the test stub describes itself — and hands the same
-promise back to the next caller. Every write through the module
-(`insert`, `update`, both upserts, every `rpc`) calls `forgetReads()` first,
-so what somebody just saved is what the next screen reads; the TTL exists for
-the colleague whose write comes through nothing here. **Sign-out and every
-sign-in forget too**: the database would refuse a member the administrator's
-rows, but a cache that answered first would not. It is never longer than one
-page — a reload starts empty — and it is one place: a second cache in a UI
-module would be a second answer to "what is on the server".
-
 ### The sheet is parsed once, against the legend it was parsed with
 
 **The sheet is parsed once, against the legend it was parsed with.**
@@ -591,127 +582,6 @@ reads through it. The legend is in the key on purpose: mapping a colour has to
 change what is on screen at once, which is the rule the legend design rests
 on. It carries `unknown` along with the view so nothing has to re-apply the
 legend to find out which colours it could not place.
-
-### The huddle goes over today, or the day before — the team's choice
-
-The huddle was built for a meeting at the start of the day: it went over the
-previous working day's work and planned the next working day, and today —
-planned the day before — was on neither side. A team that meets late in the
-shift goes over how *today* is going and plans tomorrow, so
-`rc_settings.huddle_reviews` says which (Organisation → Settings → "What the
-huddle goes over"): `today` (the default) reviews the meeting day itself and
-plans the next working day; `previous` reviews the previous working day, as
-before. Either way a day nobody on the roster works is skipped — a late
-meeting opened on a Saturday looks back to Friday. The headings, the
-presenter's question ("Today you are on … — how is it going?") and the digest
-name the days as the room would, counted from the real today: Today,
-Yesterday, Tomorrow, or the weekday. Outcomes are recorded against the day
-under review either way, through the same path.
-
-### The meeting can be run rather than filled in, and both are one path
-
-**The meeting can be run rather than filled in, and both are one path.**
-The table is a form for whoever holds the keyboard; presenter mode
-(`presenter()` in `ui/rc_huddle.js`) is the same day drawn for the room — one
-person, the question asked in the words somebody would use, a context strip
-of what the room needs rather than what the person needs. It opens on the
-first person still to answer, and every write goes through `statusButtons()`,
-so there is one recording path and not two that can disagree on screen. The
-table, the meeting and the digest are handed *one* `ctx` for the same reason.
-
-### Pressing a status is the record; the line that follows is the detail
-
-**Pressing a status is the record; the line that follows is the detail.**
-A completed task stays one click — there is nothing left to say about it —
-and everything else gives way to `sayMore()`: what is left, pre-filled with
-the plan text so it is an edit rather than a retype, and a photograph. Every
-way out of that strip writes the outcome, Escape and walking away to the next
-person included. That is the opposite of a dialog, deliberately: the one
-thing a huddle cannot afford is an outcome that looks recorded and is not.
-
-### An outcome is corrected, never edited — and "recorded" is not "final"
-
-**An outcome is corrected, never edited — and "recorded" is not "final".**
-`rc_actuals` still has no UPDATE. A change of status or of note is a new row
-whose `supersedes_id` points at the old one, written through
-`rc_record_actual(…, p_supersedes)`, which refuses a row that has already
-been corrected (two people editing one outcome get a refusal, not a silent
-winner), refuses a "correction" onto a different person or day, and carries
-the photograph forward when the new row brings none — a note edited after
-the meeting must not lose the picture taken during it. **Every reader and
-every report goes through `rc_actuals_current`**, the rows nobody has
-corrected; `rc_effort` and `rc_carry_chains` read it too, or a corrected day
-would count twice. In the interface the pick already made stays pressable
-(`statusButtons(…, current)`): another status changes the answer, the same
-status opens the strip to edit the note, and `notesBox()` takes a note
-whatever the status — "completed" is one click until somebody has something
-to say about it. An edit that changes nothing writes nothing, and Escape on
-an edit cancels, where on a first answer it records: the first answer *is*
-the record and every way out keeps it, while a correction saying nothing is
-a row on the record saying nothing. The table's Edit button and the room's
-controls call the same functions, so nothing can be said in one that the
-other reads differently.
-
-### A photograph goes up before the row, never after
-
-**A photograph goes up before the row, never after.** `rc_actuals` has no
-UPDATE grant, so a path attached afterwards would need a second row
-superseding the first. The picture is uploaded under the `client_uuid` the
-row is about to carry — which is generated on the client precisely so it
-exists before the insert — and an upload that fails is said out loud while
-the outcome is still recorded. Losing what somebody said because a photograph
-did not upload would be the wrong way round. `evidence` is its own bucket,
-readable by anybody signed in: a picture only its author can open is not
-evidence of anything.
-
-### An outcome says what the day was spent on, and what kind of work it was
-
-**An outcome says what the day was spent on, and what kind of work it was.**
-`rc_actuals.task` is what somebody actually did, in words — distinct from the
-plan (what they were asked) and from `note` (what is left, anything else) —
-and `category_id` is what the reports group it by. On a day with nothing
-planned the task is the only statement of the work there is, which is why it
-exists: the meeting heard it and the record used to keep a status against a
-blank. `workFields()` in `ui/rc_huddle.js` draws both, in the room and in the
-table alike, pre-filled from the plan so the common case is no typing. Before
-an outcome is recorded they are a draft that `commitOutcome()` reads through
-`ctx.drafts` when a status is pressed (`workOf()`); afterwards Enter in the
-box, a new category or Save writes a **correction** with the status kept —
-never on blur, because the status buttons sit beside the fields and a
-correction written on the way to pressing one would be corrected again at
-once, which `rc_record_actual()` refuses. The function takes it as `p_task`,
-the sixteenth argument; the fifteen-argument signature is dropped above it.
-
-### Who said it and who typed it are different facts
-
-**Who said it and who typed it are different facts.** Most days somebody
-speaks and somebody else enters it, and an outcome attributed to whoever
-typed it is how a record stops being trusted. `outcomeDetail()` shows
-`created_by` only where it differs from the person the outcome is about,
-which is the only case anybody wonders about — and it is one function because
-the table and the meeting must never read differently.
-
-### The digest carries no rate and no score
-
-**The digest carries no rate and no score.** `digestText()` answers the three
-questions a huddle asks — what happened, what is next, what is still in the
-way — as plain text somebody pastes into whatever the project talks in, and
-it names the people nothing was recorded for rather than leaving a gap. KPIs
-are a different audience and a different permission; the moment a digest puts
-a percentage against a name it stops being a summary and becomes a review, in
-a channel the whole project reads.
-
-### A carry chain has to survive being rolled forward
-
-**A carry chain has to survive being rolled forward.** The chain is keyed on
-the plan entry a carry came from, and carrying a task into tomorrow makes a
-*new* entry — so without `rc_plan_entries.carry_chain_id` the next carry
-starts a fresh chain and a five-day stuck job reads as five separate failures
-by one person, which is the opposite of what the chain is for. Read it with
-`carryChainFor()`, which answers the entry's existing chain or starts one,
-and `rollForward()` is the single place that writes tomorrow's row — repeating
-a task and carrying one over write the same row, and only the chain tells
-them apart afterwards.
 
 ### A read is only worth taking if the next one is compared to it
 
@@ -1109,59 +979,6 @@ label that is a names row (`isResourceLabel()` on any of its columns) never
 becomes a cancellation at all. An administrator opens the calendar on the
 look-ahead; everybody else still opens on My day.
 
-### The week plan is one tab, and it used to be two
-
-(All seven days are drawn every week, Saturday and Sunday shaded down the whole
-column — commissioning runs possessions on exactly those days, and a switch to
-show them meant they were usually hidden. Each column is headed with the day's
-name beside its date.)
-
-**The week plan is one tab, and it used to be two.** "Week plan" drew the
-team's week from the plan's side; "Resources" drew the same rows per person
-with what the 4WLA asked for beside them. People down and days across in both
-cases, over the same `rc_plan_entries`, through the same `assignmentIndex()` —
-the same table with a different subtitle, and each one missing something the
-other had, so whichever you opened the answer you wanted was on the other.
-`ui/rc_week.js` is the merge and `ui/rc_resources.js` is gone. It carries every
-load-bearing part of either: every task on a day rather than the first of them;
-what the sheet asked for where a stored entry disagrees with it (the one case
-worth drawing twice, since agreeing is now the normal case); the huddle's
-recorded outcome against each task, read-only, because the meeting is an
-administrator's screen and without this a member could not see what was said
-about their own work; the can-be-staffed row that stops work being promised for
-a day nobody can cover; and the names and places the registers cannot resolve.
-Everything it writes is an `rc_plan_entries` row, the same rows the huddle
-reads and the reports group by. Off-project work belongs here too — a day in
-the office, a day on another project — and `Office` and `Other project` are
-seeded categories for it: without somewhere for those days to go the huddle
-shows a blank against a name with no way to tell "nothing planned" from
-"nothing said". A span of days becomes one row per day, and days already
-planned, on leave or not worked are skipped and counted rather than doubled.
-
-### A day the 4WLA cancels reaches the week plan by itself
-
-A cancellation painted in the look-ahead used to stop at the look-ahead. The
-week plan derived who is on what from the Resource row and never looked at what
-the activity line's paint *said*, so a red day drew the team on it as an
-ordinary day shift — and it read the sheet once, when the tab was opened, so
-even a correct reading arrived only when somebody happened to reopen it.
-
-Now a derived day carries `cancelled` from `assignmentIndex()`, by
-`cancelledOn()` — a meaning matching /cancel/, or a day stored as the bare
-`#hex` of a legend entry that is one (`lookaheadWithResources()` names those),
-which is the rule `rc_cancelled_days` counts the log by, so the log and the plan
-cannot disagree about a day. The day is still drawn, struck through with a
-"Cancelled" badge: somebody was going to be there, and a blank would not say
-why. A Resource row's red never reaches `cells` (see *The look-ahead now says
-who*), so marking the names is still not a cancellation.
-
-The week plan and the phone's week follow the bell as the look-ahead view does
-— `watchForNewReading()`, now in `ui/rc_util.js` and shared by all three — and
-redraw once the newer reading is published, which the editor does a couple of
-seconds after the painting stops. An edit that has not been published yet is
-not a reading, and changes nothing on them. One watch per screen: a tab that
-redraws in place (stepping a week) replaces its watch rather than adding one.
-
 ### Today is a column, not a hairline
 
 **Today is a column, not a hairline.** A week grid is read by running a finger
@@ -1189,79 +1006,6 @@ the only case left worth drawing twice is a stored entry that *disagrees* with
 what the sheet asks, which is a decision taken against the workbook and the
 whole reason the week plan draws both.
 
-### The huddle reads the same index, so half the team stops reading as unplanned
-
-**The huddle reads the same index, so half the team stops reading as unplanned.**
-`planFor()` is `assignmentIndex().at`, so "Was planned" is populated from the
-4WLA wherever nobody stored a row — before that the meeting asked half the team
-what they had been planned for and answered "nothing", while the workbook said
-exactly what. It reads both the reviewed week and the planned one
-(`lookaheadWithResources`), because on a Friday those are different weeks and a
-read for one cannot say who was wanted in the other.
-
-### Linking an account before it exists is normal, not a failure
-
-**Linking an account before it exists is normal, not a failure.**
-`rc_link_account()` used to refuse with "no account exists for x — invite them
-first", which was the commonest answer by a wide margin and the wrong
-sentence: the address *had* been invited and the person had simply not signed
-up, so the refusal named no action the reader could take and the button read as
-broken. It now aims the open invitation at that roster row and returns null —
-"arranged, not linked", which the caller says out loud — and
-`rc_accept_invitation()` finishes the job when they sign up. Only an address
-with neither an account nor an open invitation refuses, and the interface
-points at "Invite somebody" when it does.
-
-### The calendar is the team's; the register around it is not
-
-**The calendar is the team's; the register around it is not.** The 4WLA was
-administrators-only, so the people named on it were the only people who could
-not look at it — they asked their manager for a screenshot. `rc_lookahead_snapshots`
-and `rc_lookahead_rows` are now readable by anybody signed in and written only
-by an administrator; `rc_ingest_runs`, `rc_change_events`, `rc_sars` and the
-annotations stay admin-only, because those are the evidence base for a delay
-claim rather than a statement of what the team is being asked to do. The tab
-shows non-admins the Calendar section alone — no Check now, no legend editing
-— and the sections they cannot read are not offered, since a section that
-comes back empty is a door onto a wall. The PDF export *is* theirs: it is a
-drawing of what they can already see.
-
-### A member plans their own days, and takes them back
-
-**A member plans their own days, and takes them back.** `rc_plan_entries`
-checks `rc_can_act_for(person_id)`, the rule an outcome already followed, and
-`rc_supersede_plan()` and `rc_withdraw_plan()` ask the same question of the row
-they are changing — whoever may plan a day may correct it and remove it, or
-writing one somebody cannot fix is the "no way back" trap this schema avoids
-everywhere else. In the week plan the person select holds the one name they
-could write and the per-task Edit and Delete buttons appear on their own row
-only. A viewer plans nobody, including themselves, because `rc_can_act_for()`
-is false for them.
-**"Delete" is a write.** There is no DELETE grant on `rc_plan_entries` and
-there is not going to be: a plan that changed the evening before the shift is
-what a claim is built from, and a row that can be removed is a record that can
-be edited. So `rc_withdraw_plan()` writes a tombstone superseding the original
-and carrying `withdrawn`, and `rc_plan_current` drops the pair — the day leaves
-the schedule while the table still says it was planned and then withdrawn, by
-whom and when.
-
-### A member reads the plan and never writes it
-
-**A member reads the plan and never writes it.** The timeline holds the P6
-narrative and is maintained by whoever runs the project; the calendar's members
-are the field team. They were read-only in practice, because the plan lives in
-a folder and somebody else usually held the pen — which is not the same thing,
-because the pen is a *turn*: "Take over editing" was on screen and a member who
-pressed it got the plan. `core/access.js` held one boolean and a reason, which
-`main.js` stated from the calendar's role, and `core/store.js` and
-`core/filestore.js` refused edits and the pen while it was set.
-
-*Retired with the accounts.* No build has had a calendar role since the
-calendar moved into the folder, so nothing set the lock and every branch that
-read it was unreachable; the lock and those branches are gone. Who may edit the
-plan is the pen, and beneath it the folder's sharing — a read-only OneDrive
-share cannot write. `core/access.js` keeps only the reader's own view, below.
-
 ### A reader's view is their own
 
 **A reader's view is their own.** The filter, the filter mode and which
@@ -1280,92 +1024,6 @@ kept when there was no account, so none moved when the accounts went). That is l
 browser profile too: the honest limitation, given there is no server to keep it
 on and the plan is the one place it must not go.
 
-### Reports, Organisation and the Daily huddle are an administrator's, and the tabs say so
-
-**Reports, Organisation and the Daily huddle are an administrator's, and the
-tabs say so.** The KPIs are a different audience and a different permission;
-the roster, the locations and the accounts are the calendar's administration
-rather than its use. Reports and Organisation are restricted in the policies —
-hiding the tab only stops offering a door onto a wall, which is the same thing
-`rc_effort`'s `rc_is_admin()` already did to anybody who reached the view
-directly. **The huddle is a different argument**: a member could use it, and
-there is nothing there for them to use. It is the meeting — it asks a whole
-team in turn how yesterday went, and it is the one path an outcome is recorded
-through. What a member needs out of it is the status and the note recorded
-against their own work, and that is drawn in the week plan beside the rest of
-their week, read-only, because there must be one recording path and not two
-that can disagree on screen.
-
-### A day is a list of tasks, not a task
-
-**A day is a list of tasks, not a task.** A shift is routinely two jobs — a
-test to witness in the morning and a cable pull after it — and a day that
-could hold one is how somebody ends up with one of the three things they were
-asked for. `assignmentIndex()` answers `on(person, iso)` with every entry, and
-`at()` with the first for the one caller that needs a single row: an outcome
-points at one plan entry and a carry carries one chain. The week plan, the
-week plan's cell, the huddle's "Was planned" and the digest all draw the list;
-`assign()` adds to a day rather than skipping it, and the derived side emits
-every look-ahead row naming somebody that day rather than the first with a
-count beside it.
-
-### There is one place a day is planned
-
-**There is one place a day is planned.** It was two: the old week plan's "+"
-opened a dialog to pick a look-ahead row and write it down, which outlived the
-change making the 4WLA *be* the plan — everything the sheet names is already
-somebody's plan without anybody pressing anything, so the button only ever
-wrote down what the sheet already said, or invented a day it said nothing
-about. Now the merged week plan is that one place: "+ task" plans a day the
-sheet has never heard of, and a drawn task carries "Edit" or, on a derived day,
-"Override" — labelled that because writing the first stored row against a day
-the sheet is asserting is a decision taken against the workbook. Per task
-rather than per cell, since a cell routinely holds two.
-
-### When the sheet moves a task, the task moves
-
-**When the sheet moves a task, the task moves.** A stored entry carrying a
-`lookahead_row_id` is somebody having confirmed or overridden what that row
-said; when a later read puts a different name on the same row for the same
-day, the work has moved, and leaving the entry where it was is how somebody
-turns up for a shift that is not theirs while the person who now has it has a
-blank against their name. `reassignments()` in `core/lookahead.js` derives it,
-with the name lookup **injected** for the reason `rowsFrom()` takes `locate` —
-so the whole thing is tested with no browser and no network. It refuses to
-decide unless it is certain: the row has to name somebody on that day (the
-sheet going quiet is not a reassignment, and a task cannot move to nobody),
-exactly one person, every name on the day resolved, and somebody other than
-whoever has it. `rc_reassign_plan()` does the write as a supersede carrying
-`reassigned_from`, so the outgoing row stays and the week plan badges the new
-one "Reassigned from Dana" — the thing worth knowing is that it *moved*, and
-once the sheet has moved on there is nothing left to derive that from. Applied
-at **ingest**, not at paint time: it is a write, and that is the one moment
-somebody deliberately asked the sheet what it says now.
-
-### Being scheduled is a different fact from what somebody may do
-
-**Being scheduled is a different fact from what somebody may do.**
-`rc_people.scheduled` is what the huddle and the week plan filter on
-(`listPeople({ scheduledOnly: true })`), never the role. A manager
-administers the calendar and is never assigned to a location, but deriving
-that from `role = 'admin'` would drop an administrator who *does* take shifts
-out of the meeting the moment they were promoted, with no way back short of
-demoting them. The column defaults to true for everybody; `rc_schema.sql`
-stands down the administrators that already exist when it is applied, once,
-and the Add-person dialog merely *suggests* the same for a new one.
-
-### An invitation link points at the site, not at the window it was made in
-
-**An invitation link points at the site, not at the window it was made in.**
-`location.origin` inside the desktop shell is `tauri.localhost`, so an
-invitation generated from the installed application copied an address that
-means nothing in anybody else's browser — and the only symptom was a
-colleague saying the link did not work. `joinLink()` uses
-`CX_SHELL.channel`, the deployment the shell already follows for updates,
-and falls back to the address bar in a browser where that is the right
-answer. A desktop build with no channel has no site to name, so it says so
-rather than copying something broken.
-
 ### Nothing is emailed from the application, and that is structural
 
 **Nothing is emailed from the application, and that is structural.** There is
@@ -1377,82 +1035,6 @@ key: `rc_enforce_invitation()` still refuses an address nobody invited, so a
 forwarded link gets a stranger nowhere. Sign-up itself goes through GoTrue
 rather than PostgREST, which is why the gate is a trigger on `auth.users` and
 not anything `ui/rc.js` does.
-
-### Adding somebody to the calendar never needs the SQL editor
-
-**Adding somebody to the calendar never needs the SQL editor.** Invitations,
-linking an account to a roster row and changing a role are all
-`security definer` functions — `rc_invite`, `rc_revoke_invitation`,
-`rc_list_invitations`, `rc_link_account`, `rc_set_role` — driven from
-Organisation → Accounts. They are functions rather than table writes for the
-reason the whole schema is built on: a refused UPDATE matches nothing and
-reports success, so `rc_set_role` raises instead, and refuses the demotion
-that would leave nobody able to administer anything. Supabase Auth still
-holds the password, and that is deliberate — `auth.uid()` is what every
-policy keys on, so the permission model *is* the authentication and replacing
-it would mean rewriting all of it. What is managed in the application is who
-may have an account and what they may do with it, never the credential.
-
-### Plan data must never reach Supabase, and that is enforced rather than intended
-
-**Plan data must never reach Supabase, and that is enforced rather than
-intended.** It used to be structural — the desktop build has no backend at
-all, so it could not have sent anything — and putting a client back in the
-page would have made it a convention. So: a separate config key
-(`rcSupabaseUrl`, never `supabaseUrl`), a separate client module the plan's
-storage path never imports, a separate auth storage key, and
-`tools/smoke_calendar.js`, which edits the plan hard and asserts that nothing
-carrying plan content ever left — through the client *or* over the wire. That
-last check is the one that fails if somebody reaches across; every other
-check would still pass.
-
-### A blocked day is not an obstacle until somebody owns it
-
-**A blocked day is not an obstacle until somebody owns it.** `rc_actuals`
-says a day was lost and stops there — no owner, no date, no way to ask
-whether it is still true — so the huddle produced a list that only grew, and
-a list that only grows is one nobody reads. `rc_blockers` is raised once and
-never edited; `rc_blocker_updates` is append-only and its latest row is the
-state, read through `rc_blockers_current`. Taking one on, moving the date,
-chasing it and closing it are each a row, because "we told BART on the 4th
-and chased on the 9th" is the sentence a claim is built from and an UPDATE
-would erase every word of it. The owner is picked from **everybody**, not the
-scheduled roster: whoever chases a released possession is usually the manager,
-who is stood down from the meeting precisely because they take no work from
-it.
-
-### Asking for leave is a member's; answering is an administrator's
-
-**Asking for leave is a member's; answering is an administrator's.** Booking
-was administrators-only, which made the commonest thing anybody wants from
-this module something they had to get somebody else to type — so it went into
-the 4WLA instead, or nowhere, and "the sheet says they are off and nothing is
-booked" became the normal case. A member now inserts their own `rc_leave` row
-and it lands as `requested`; the *status is the permission*, and the policies
-are written on exactly that — a member's insert is pinned to `requested` for
-their own person id, and the only status their update can write is
-`cancelled`, so a request cannot approve itself and asking is still something
-you can take back. There is no second table: a separate list of requests would
-be a second answer to "is Dana off on Tuesday", and approving one changes a
-status rather than copying a row. **A request is not leave yet** —
-`availability()` returns it as `asked` alongside an unchanged state, because a
-member asking must not take themselves out of the schedule before anybody has
-decided. The PTO tab stands the open ones up in a section of their own, over
-the whole register rather than the four weeks on screen (a request for October
-made today is a thing to answer today), and the count is on the calendar's
-chrome — a request nobody is told about is a request that sits there. Nothing
-is written into the 4WLA by approving one: the sheet is somebody's to edit when
-the time comes, and the record is then what it agrees with.
-
-### Two families of status, never averaged
-
-**Two families of status, never averaged.** Completed / partial / carried are
-what somebody did; blocked / reassigned are what was done to them. A
-possession released late is not underperformance, and folding it in would
-make the number worse than useless — people would stop saying they were
-blocked. `rc_effort.signal` is where the split lives. Leave is a third thing
-again, which is why `rc_leave` exists: without it, absence gets silently
-distributed across the performance statuses.
 
 ### Retire is the first answer; Delete is the second, and Postgres decides which applies
 
@@ -1472,16 +1054,6 @@ and reports success. The guard is not optional — `rc_plan_entries` and
 evidence with it at the database, silently. The interface checks nothing
 itself and shows the refusal as it comes: a rule written twice is a rule that
 will one day disagree with itself.
-
-### Evidence is append-only, in the database
-
-**Evidence is append-only, in the database.** `rc_plan_entries` and
-`rc_actuals` have no UPDATE or DELETE grant, and neither does
-`rc_change_annotations` — a correction is a new row that supersedes the old.
-The revoke has to name `authenticated`, not just `public, anon`: with the
-privilege intact, RLS excludes the row instead, the statement matches nothing
-and the driver reports success, so somebody editing an annotation would be
-told it worked.
 
 ### The look-ahead's window moving is not a change of scope
 
@@ -1728,18 +1300,6 @@ next ingest — and `sheet_name` and the legend both come from the database
 (`rc_settings`, `rc_legend`), because a renamed tab must mean a field
 somebody edits, not a redeploy.
 
-### A plan is revised, never edited
-
-**A plan is revised, never edited.** `rc_supersede_plan()` writes a new row
-pointing at the old one, and `rc_plan_current` is what everything reads — the
-table underneath keeps every version, because "the plan changed the evening
-before the shift" is itself delay evidence. It refuses an entry that has
-already been revised, so two people editing one day get a refusal rather than
-one of them silently winning, and it carries `carry_chain_id` across for the
-same reason rolling a task forward does. A clickable cell in the week plan is
-the only way in, and it shows the history: a revision nobody can see is an
-edit with extra steps.
-
 ### The calendar's data can be taken out whole
 
 **The calendar's data can be taken out whole.** `exportEverything()` reads
@@ -1842,18 +1402,6 @@ layout beside it once the look-ahead is written here; with no folder
 connected it is downloaded. The settings are this computer's
 (`localStorage`), because the folder and the clock are.
 
-### A SAR is recorded, filed and linked in that order, and each step can fail alone
-
-**A SAR is recorded, filed and linked in that order, and each step can fail
-alone.** The row first, then the upload, then the move out of `sars/inbox/`:
-a PDF uploaded but not moved is a duplicate somebody can see, while a PDF
-moved before its row existed is a file nobody can find. What a SAR *covers*
-is confirmed by hand from the rows at that location in that week — one SAR
-covering several rows is expected, not an ambiguity — and never matched on
-activity text, which is worded differently on the two sides. Until this was
-wired, `rc_rows_without_sar` reported every row as having no access for ever,
-which is worse than not reporting it at all.
-
 ### The calendar is used standing up, so it stops assuming a wide screen
 
 **The calendar is used standing up, so it stops assuming a wide screen.**
@@ -1866,38 +1414,6 @@ own frame, and pretending they fit a phone would be a worse answer than
 letting them scroll. The page itself must never scroll sideways, and there is
 a check for exactly that.
 
-### The phone app is the calendar alone, and the linker keeps it that way
-
-**The phone app is the calendar alone, and the linker keeps it that way.**
-`m/` is CX Calendar: **My week** (one person's days, and where they change
-their own plan), **Look-ahead** (the sheet one day at a time), **PTO** (ask
-for time off, see the answer, withdraw it while it is unanswered) and
-**More**. It is a second entry point, `src/mobile.js`, rather than a
-responsive mode of the application, because what it must *not* carry is the
-point — and a bundle can only be kept free of the timeline by never linking it
-in. `tools/build.js` refuses the store, the plan's three storage backends, the
-timeline, the plan exporters and the desktop calendar's router, naming the
-import chain; the answer to a refusal is to move the helper down a layer, never
-to widen what the phone may carry. It is also not the calendar bundle: it is
-standalone, with its own copy of what it reaches, because the phone has no
-main bundle to register into.
-
-### The phone app decides nothing of its own
-
-**The phone app decides nothing of its own.** A day's tasks are
-`assignmentIndex()`, how a task went is `outcomeLookup()`, availability is
-`availability()`, the day on the sheet is `agendaFor()` in `core/lookahead.js`,
-the sign-in is `ui/rc_gate.js`, and every write is the same `rc_plan_entries`
-row through the same `core/rc.js` — add, `supersedePlan()`, `withdrawPlan()`,
-and overriding a derived day by writing the first stored entry with its
-`lookahead_row_id`. So a task added on a phone is in the huddle exactly as one
-added at a desk, and `rc_can_act_for()` in Postgres is the control, as ever.
-PTO is the same single `rc_leave` row the desktop PTO tab answers:
-`requestLeave()` for a member, booked `approved` for an administrator's own,
-`updateLeave(…, { status: 'cancelled' })` to withdraw — never a second list of
-requests, and the policies already pin what each role may write. It reads
-through `leaveFor()`, one person's rows from today on.
-
 ### The third shift is called Blanket and stored as `possession`
 
 **The third shift is called Blanket and stored as `possession`.** The column's
@@ -1905,51 +1421,6 @@ check constraint names `possession`, and renaming a stored value to change a
 word on screen would be a migration of every row for nothing a reader sees.
 Draw a shift with `shiftLabel()`, never the raw value — the week plan and the
 huddle printed "possession" beside tasks until they did.
-
-### A phone opening the site is sent to the phone app
-
-The site is the full calendar and the timeline, laid out for a screen. Opened
-on a phone it was the desktop page shrunk, and "Add to Home Screen" from it
-saved a bookmark — iOS and Android alike open that in a browser tab every
-time, because the page has no manifest and does not declare itself an app.
-The phone app (`m/`) does, so the same gesture there installs something that
-opens on its own, full screen.
-
-`phone.js` runs on the site before the bundle is fetched (plain script, not
-in the bundle — it has to beat 1.4 MB, and the policy allows no inline
-script) and sends a **phone** to `m/` with `location.replace()`, so Back does
-not bounce it there again. A phone is a touch screen whose shorter side is
-under 600 CSS pixels; a tablet is somebody running the huddle or the editor
-and stays. It acts only in the calendar shape — the plan has no backend, the
-calendar has one — because nowhere else is `m/` published. "Open the full
-site" in the app goes to `../?full=1`, which is kept on that phone until the
-app is opened again. The desktop shell drops the tag (`tools/desktop.js`): a
-desktop is never a phone, and the shell ships no phone app.
-
-A home-screen icon saved from the site before this is still a bookmark to the
-site: it now lands in the phone app, but in the browser. Remove it and add the
-app again from `m/`.
-
-### The phone's service worker keeps the app, never the data
-
-*Retired with the phone app (`docs/PLAN_ONEDRIVE_ONLY.md`); its stylesheet,
-`css/mobile.css`, went last.*
-
-**The phone's service worker keeps the app, never the data.** `m/sw.js`
-precaches the page, the bundle, the stylesheets and `config.js`, asks the
-network first for anything unhashed, never touches the calendar's origin, and
-is scoped to `m/` so the timeline passes it untouched — a longer-lived copy of
-what the calendar says would be a second answer to "what is on the server",
-which `core/rc.js`'s thirty-second memory exists to avoid. Offline, it opens
-and says it cannot reach the calendar. `tools/dist.js` publishes it **in the
-calendar shape only** (every other shape has no calendar for it to open),
-renames its bundle after its contents like the site's, and rewrites the
-worker's `PRECACHE` and `VERSION` to match. Its theme is its own
-(`mobile/theme.js`, localStorage, following the phone) because `ui/theme.js`
-imports the store. `css/mobile.css` is scoped to `.m-app` and `m-` classes,
-makes every modal a bottom sheet, holds form text at 16px so iOS does not
-zoom, and never writes a raw colour. The icons are drawn by
-`tools/pwa_icons.js`; regenerate rather than edit them.
 
 ### New user actions go in `ui/commands.js`
 
@@ -2051,17 +1522,6 @@ is behind sees a banner naming `migrate.sql` then `rc_schema.sql`; a member is
 told some changes may be refused; a page older than its database is told to
 reload. **Raise both together** whenever the calendar's schema changes shape —
 `tools/test_sql.js` fails when they disagree.
-
-### Only the calendar reports its failures, and only from named places
-
-`rc.reportError(area, err)` writes a row to `rc_client_errors`, once per
-message per page and at most twenty, and never throws; Organisation → Problems
-lists them. It is called from specific call sites — a tab that failed to load,
-an offline outcome the server refused, a look-ahead read that went wrong —
-and **never from a global error handler**: an error thrown anywhere in the page
-can carry plan text, and plan data must never reach Supabase. The table is
-insert-own-row, admin-read, no update or delete; clearing goes through
-`rc_clear_client_errors()`.
 
 ### The command menu adds no behaviour
 
@@ -2338,37 +1798,6 @@ in file mode too, where it now has nothing to read until the calendar is
 signed in. The editor's own Excel export is the way a file leaves; nothing
 comes back in through the timeline.
 
-### Progress comes back from the huddle as actual dates, offered
-
-The huddle records who worked on what each day; the timeline has had
-`actualStart` / `actualEnd` fields since the inspector did, filled in by hand or
-not at all. "Progress from the calendar" joins them. `outcomeProgress()` in
-`core/lookahead.js` traces each worked outcome (completed, partial, carried —
-never blocked, reassigned or absent) to its look-ahead row, directly or through
-its plan entry, and from the row's label to the bars linked to suggestions with
-the same `suggestionKey()`. A day with no row falls back to its task text, which
-a day read off the sheet carries verbatim; either way the match is exact or
-nothing. The button reads afresh (`forgetReads()`): an outcome recorded
-seconds ago is the one somebody pressed it to see.
-
-A bar may stand for several activities, and each is read on its own — runs of
-one row are one activity, grouped by key. The actual start is the first day
-*any* of them was worked. The actual finish (the day after the last worked day,
-half-open like the bar) is offered only when **every** activity is done: nothing
-ahead of it on the look-ahead, and its own last word "completed". One activity
-finishing is not the bar finishing, and an activity nobody has recorded against
-holds the finish back as surely as one marked partial — pooling the outcomes and
-reading only the last day across all of them offered a finish while half the
-work was still open. The dialog says which activities a held finish waits on,
-always; the per-activity breakdown (days, span, last word, and Done / Still
-planned / Not completed / Nothing recorded) is shown or hidden per bar, and
-"Show each activity" opens or closes them all and is remembered in this
-browser's storage — a convenience, so a refused storage only means it starts
-hidden.
-
-A date nobody set starts ticked; one that would replace a typed date does not.
-Applying is one undoable edit, and nothing is sent to the calendar.
-
 ### The export is opened by a second program in CI
 
 `test_la_edit.js` reads every export back through the application's own
@@ -2453,20 +1882,6 @@ it (`rc_la_edits`). Changes now joins the two, and the id is never shown.
   `la_row_id` is written without it and says so; a change refused over the
   column or the new kind is written without them, and reported. Schema 10.
 
-### An administrator works from one list
-
-Organisation opens on **Inbox** the first time in a session (`ui/rc_inbox.js`):
-leave to answer (approved or declined in place — one update either way), names
-and locations on the next five weeks of the look-ahead the registers cannot
-place, colours the legend does not explain, support codes nobody registered,
-cancellations with no reason, blockers nobody owns, invitations expired or not
-taken up, problems reported this week and a database behind the application.
-None of it is new information; each item is a press from the screen that
-answers it. Every source is read on its own, and one that fails is reported as
-a line of its own — "nothing is waiting" and "I could not look" are different
-answers. The Organisation tab carries the count, remembered for a minute
-because the header redraws on every write and the inbox reads a dozen sources.
-
 ### Settings are changed on screen
 
 Organisation → Settings edits the `rc_settings` rows that used to need the SQL
@@ -2478,32 +1893,6 @@ workbook asks first, exactly as the editor's menu does, and adopting the editor
 goes to the editor, which has to import something before there is anything to
 write in. A keep period under a fortnight is refused on screen and read as a
 fortnight by the database.
-
-### Seeing it as somebody else is a preview, refused at the client
-
-"View as…" lets an administrator see the calendar as a member or a viewer
-(`rc.previewAs()`): `me()`, `role()`, `isAdmin()` and `canWrite()` answer as
-that person, so every screen draws what they would get, and a banner above
-every tab says so and leads back. **Every write is refused in `core/rc.js`
-before it leaves the page** — `insert`, `update`, every function that is not a
-known read, settings, the legend, uploads and error reports — with an error
-carrying `preview: true`, and the huddle does not queue such a refusal for
-replay (it would replay as the administrator). The database is not asked to
-pretend: it still answers as the administrator, so a preview shows somebody's
-screens, not a proof of what their account could read — that proof is
-`supabase/test/rc_permissions.sql`. An administrator cannot preview another
-administrator, and the file lock's display name never takes a previewed name.
-
-### My day is where the team opens the calendar
-
-Members and viewers land on **My day** (`ui/rc_myday.js`): today and the next
-working day by their own working days, each task with where, which shift and
-who else is on the same look-ahead row that day — matched on the row, never on
-the wording — then the week at a glance, the last outcome recorded against them
-and the blockers they are chasing. It is a reading of `assignmentIndex()`, the
-same one the week plan and the huddle make, so it cannot disagree with them.
-**It records nothing.** The huddle is the one path an outcome is entered
-through, and a second one here would be two that could disagree on screen.
 
 ### Readings are compacted, never deleted
 
@@ -2556,29 +1945,6 @@ An activity's name is its description column (`activityTitle()`). The rule
 used to take the first heading that mentioned an activity, which on BART's
 sheet is **Activity ID** — every suggestion on the timeline was named after its
 CDRL number. An identifier is never the title.
-
-### What changed for me is two readings compared, and Got it is append-only
-
-My day opens on what changed for the person since the reading they last
-acknowledged, for their days from today to four weeks out
-(`changesForMe()` in `core/lookahead.js`): **added**, **taken off**, **given
-to** somebody else, **moved** (a day of the same activity off and another on,
-within a fortnight, paired nearest first), **cancelled**, **back on** and
-**shift changed** — in words, by date. Both sides are the stored
-`rc_lookahead_rows` of one reading each, which compaction never touches, so any
-old reading can be compared; a reading is a complete statement of the weeks it
-covers, so nothing is merged across readings.
-
-**Got it** is a row in `rc_la_seen`: the person, the reading, when, and how
-many changes were on screen. Anybody on the team adds one for themselves — a
-viewer too, since being told is not writing the plan — nobody updates or
-deletes one, and only an administrator reads the team's. The first visit
-records the reading on screen as the starting point, and a new reading that
-changes none of the person's days is recorded quietly, because there was
-nothing to see; neither happens while previewing. The My day tab counts what
-is waiting, and the administrator's inbox lists who has changes they have not
-seen and who has never opened My day. Reminders stay inside the application:
-nothing is emailed from it, by design.
 
 ### The Activity ID is filled from P6, and a row without one says why
 
@@ -2836,33 +2202,6 @@ clearance signatures are BART's and stay blank.
 
 ## Added with the performance pass
 
-### The published bundles are minified; the committed ones are not
-
-`tools/dist.js` minifies every bundle and stylesheet it publishes (esbuild,
-`minifyFile()`), after every literal it rewrites (`CALENDAR_BUNDLE`,
-`CALENDAR_CSS`) and before anything is named after its bytes, so the hash is of
-what is served. The repository's bundles stay the linker's readable output, and
-CI still compares them byte for byte with the source. Names are not kept: a
-reported failure records its area and message, never a stack, and `keepNames`
-cost the main bundle a twentieth of its size. esbuild is the one build-time
-dependency; `dist.js` refuses to run without it rather than publish bundles
-twice the size, so the deploy job runs `npm ci`. CI drives `smoke.js` and
-`smoke_calendar.js` once more against `dist/` (`CX_SITE=dist`), because the
-repository's copies are not what anybody downloads.
-
-### The Supabase client is fetched when a client is made
-
-`vendor/supabase.js` used to be a blocking tag ahead of the bundle, so every page
-— the plan included, which has no backend in any shape this is deployed in —
-parsed 200 kB of library before the timeline could start. `core/sdk.js` now
-injects it the first time `core/cloud.js` or `core/rc.js` makes a client, from
-their `init()`, which was already async and already after the desktop trial
-gate. `init()` shares one start between callers, so two of them during the
-download make one client, not two. The phone app still loads it by tag — its
-first screen is the calendar — and `loadSupabase()` then finds the global and
-fetches nothing. No page names the file in a tag any more, so `dist.js` and
-`desktop.js` only decide whether the file is shipped.
-
 ### The calendar's stylesheet comes with its bundle
 
 Most of `css/calendar.css` styled only what the calendar bundle builds, and every
@@ -2877,16 +2216,6 @@ look-ahead's tables are `.rc-table.la-grid`, and `.la-grid td` must win. The
 phone app and the desktop shell carry the calendar from the start and link
 `rc.css` directly. Adding a rule to `rc.css` that ties with one in
 `calendar.css` changes which one wins.
-
-### A policy asks who is asking once per query
-
-Every policy wraps `auth.uid()` and the identity helpers (`rc_is_admin()`,
-`rc_me()`, `rc_my_role()`, `is_admin()`) in a sub-select. Bare, Postgres calls
-them for every row the table holds — and they are `SECURITY DEFINER`, so they
-cannot be inlined: a read of `rc_la_cells` ran one `rc_people` query per cell.
-Wrapped, each is an InitPlan, evaluated once per statement. Both permission
-suites fail on a bare call, naming the policy. A helper that takes the row
-(`rc_can_act_for(person_id)`) is per row by nature and is left alone.
 
 ### The look-ahead rings a bell; the polls only check on it
 
@@ -2903,25 +2232,6 @@ comes back after a drop every listener is called once. A ring is not a reason
 to forget reads (every listener asks with a read that is never remembered),
 but a newer revision is: the editor forgets what it remembered before it
 reloads, or a reload inside the thirty seconds drew the sheet as it was.
-
-### Every foreign key that names a calendar row has an index
-
-Retiring a person, a location, a category or a party asks Postgres for rows
-that still point at it, and so does every join along a key and every "what
-superseded this" in `rc_plan_current`. Without an index under the key each of
-those is a scan of the referencing table. `rc_schema.sql` indexes every foreign
-key that names a calendar row; the who-did-it stamps that point at
-`auth.users` are left alone — an account is never deleted under its rows and
-nothing is looked up by them, so an index there is write cost alone.
-`rc_permissions.sql` fails when a key arrives without one.
-
-### Paged reads ask for the count, then the rest together
-
-`selectAll()` asks for an exact count with its first page and fetches the other
-pages at once; a sheet of four pages was four round trips end to end. A page
-that comes back full after them — rows written between the count and the read —
-is followed one at a time, as before, so a stale count loses nothing. Every
-caller orders by a unique key, which is what makes the pages line up.
 
 ### An edit redraws the days it touched
 
@@ -2978,20 +2288,6 @@ option without a default reads as required. Both run in CI. The first run found
 `store.setMeta()` dropping its options, which made renaming the project one
 undo step per keystroke.
 
-### The site keeps the timeline for when there is no network, never the plan
-
-`sw.js` keeps the page, the main bundle, the stylesheets it links, `config.js`
-and `phone.js`, so the timeline opens offline — in file mode the plan is already
-on the machine. It keeps neither the plan nor anything only the calendar needs:
-the calendar cannot work without its server, says so offline, and precaching
-its bundle or the Supabase client would download for everybody what only its
-users fetch. It leaves `m/` (the phone app's own worker) and `desktop/` (the
-update channel) to the network. Hashed files are answered from the cache, the
-page and anything unhashed from the network first. `dist.js` stamps the hashed
-names and a version derived from them, as it does for `m/sw.js`. It is not
-registered in the desktop app, whose page is on disk and whose updates are its
-own, nor from a `file://` page.
-
 ### The System theme is Dark or Light, as the computer is
 
 `ui/theme.js` has a sixth choice that is not a sixth palette: System draws Dark
@@ -3017,7 +2313,13 @@ baseline comparison — down to measuring, at five zooms, that no ghost, and no 
 written on one, is drawn over a bar or over another ghost — all eighteen dock panes,
 all five themes, every exporter (including PDF header validation) and reload
 persistence — then a tall plan drawing only the rows in view, the page opening
-less motion and the System theme. It reads every request the page makes, so a
+less motion and the System theme, and, on a fresh page, things once drawn in
+the wrong place: lane names cut short by hidden buttons, a tool off the edge
+of Add Objects, an arrow painted over the legend, paired fields out of line,
+a distance to a date counted on a five-day week, a theme change in the undo
+history, and a narrow sidebar's switch and Present clipped. Each of those
+checks measures something real — one that found nothing to measure fails. It
+reads every request the page makes, so a
 request to anything but the page's own files, or the calendar's code before
 the calendar is opened, fails it. **Any console error fails the run.**
 
@@ -3101,3 +2403,722 @@ because the calendar is about days and a suite reading the wall clock was a
 different suite on a Saturday. Time still passes; only the starting instant is
 fixed. `CX_TEST_NOW` picks another instant and `CX_TEST_NOW=real` unpins it; CI
 runs the calendar and the phone app a second time as though it were a Monday.
+
+## Retired
+
+What these sections describe is gone: the huddle and the week plan, My day,
+Reports and the inbox, SARs, accounts and invitations, asking for leave, the
+phone app, the website, and the Postgres and Supabase machinery under them
+(`docs/PLAN_ONEDRIVE_ONLY.md`, 27 October 2026). They stay as the record of
+why — several live rules began as one of them — but none of them is a rule to
+follow, and none is linked from `CLAUDE.md`.
+
+### Reads are remembered for thirty seconds and forgotten on every write
+
+**Reads are remembered for thirty seconds and forgotten on every write.**
+`select()` in `core/rc.js` keys a read on the table, the columns and the
+filters the query built — captured through a proxy, because neither the
+client's builder nor the test stub describes itself — and hands the same
+promise back to the next caller. Every write through the module
+(`insert`, `update`, both upserts, every `rpc`) calls `forgetReads()` first,
+so what somebody just saved is what the next screen reads; the TTL exists for
+the colleague whose write comes through nothing here. **Sign-out and every
+sign-in forget too**: the database would refuse a member the administrator's
+rows, but a cache that answered first would not. It is never longer than one
+page — a reload starts empty — and it is one place: a second cache in a UI
+module would be a second answer to "what is on the server".
+
+### The huddle goes over today, or the day before — the team's choice
+
+The huddle was built for a meeting at the start of the day: it went over the
+previous working day's work and planned the next working day, and today —
+planned the day before — was on neither side. A team that meets late in the
+shift goes over how *today* is going and plans tomorrow, so
+`rc_settings.huddle_reviews` says which (Organisation → Settings → "What the
+huddle goes over"): `today` (the default) reviews the meeting day itself and
+plans the next working day; `previous` reviews the previous working day, as
+before. Either way a day nobody on the roster works is skipped — a late
+meeting opened on a Saturday looks back to Friday. The headings, the
+presenter's question ("Today you are on … — how is it going?") and the digest
+name the days as the room would, counted from the real today: Today,
+Yesterday, Tomorrow, or the weekday. Outcomes are recorded against the day
+under review either way, through the same path.
+
+### The meeting can be run rather than filled in, and both are one path
+
+**The meeting can be run rather than filled in, and both are one path.**
+The table is a form for whoever holds the keyboard; presenter mode
+(`presenter()` in `ui/rc_huddle.js`) is the same day drawn for the room — one
+person, the question asked in the words somebody would use, a context strip
+of what the room needs rather than what the person needs. It opens on the
+first person still to answer, and every write goes through `statusButtons()`,
+so there is one recording path and not two that can disagree on screen. The
+table, the meeting and the digest are handed *one* `ctx` for the same reason.
+
+### Pressing a status is the record; the line that follows is the detail
+
+**Pressing a status is the record; the line that follows is the detail.**
+A completed task stays one click — there is nothing left to say about it —
+and everything else gives way to `sayMore()`: what is left, pre-filled with
+the plan text so it is an edit rather than a retype, and a photograph. Every
+way out of that strip writes the outcome, Escape and walking away to the next
+person included. That is the opposite of a dialog, deliberately: the one
+thing a huddle cannot afford is an outcome that looks recorded and is not.
+
+### An outcome is corrected, never edited — and "recorded" is not "final"
+
+**An outcome is corrected, never edited — and "recorded" is not "final".**
+`rc_actuals` still has no UPDATE. A change of status or of note is a new row
+whose `supersedes_id` points at the old one, written through
+`rc_record_actual(…, p_supersedes)`, which refuses a row that has already
+been corrected (two people editing one outcome get a refusal, not a silent
+winner), refuses a "correction" onto a different person or day, and carries
+the photograph forward when the new row brings none — a note edited after
+the meeting must not lose the picture taken during it. **Every reader and
+every report goes through `rc_actuals_current`**, the rows nobody has
+corrected; `rc_effort` and `rc_carry_chains` read it too, or a corrected day
+would count twice. In the interface the pick already made stays pressable
+(`statusButtons(…, current)`): another status changes the answer, the same
+status opens the strip to edit the note, and `notesBox()` takes a note
+whatever the status — "completed" is one click until somebody has something
+to say about it. An edit that changes nothing writes nothing, and Escape on
+an edit cancels, where on a first answer it records: the first answer *is*
+the record and every way out keeps it, while a correction saying nothing is
+a row on the record saying nothing. The table's Edit button and the room's
+controls call the same functions, so nothing can be said in one that the
+other reads differently.
+
+### A photograph goes up before the row, never after
+
+**A photograph goes up before the row, never after.** `rc_actuals` has no
+UPDATE grant, so a path attached afterwards would need a second row
+superseding the first. The picture is uploaded under the `client_uuid` the
+row is about to carry — which is generated on the client precisely so it
+exists before the insert — and an upload that fails is said out loud while
+the outcome is still recorded. Losing what somebody said because a photograph
+did not upload would be the wrong way round. `evidence` is its own bucket,
+readable by anybody signed in: a picture only its author can open is not
+evidence of anything.
+
+### An outcome says what the day was spent on, and what kind of work it was
+
+**An outcome says what the day was spent on, and what kind of work it was.**
+`rc_actuals.task` is what somebody actually did, in words — distinct from the
+plan (what they were asked) and from `note` (what is left, anything else) —
+and `category_id` is what the reports group it by. On a day with nothing
+planned the task is the only statement of the work there is, which is why it
+exists: the meeting heard it and the record used to keep a status against a
+blank. `workFields()` in `ui/rc_huddle.js` draws both, in the room and in the
+table alike, pre-filled from the plan so the common case is no typing. Before
+an outcome is recorded they are a draft that `commitOutcome()` reads through
+`ctx.drafts` when a status is pressed (`workOf()`); afterwards Enter in the
+box, a new category or Save writes a **correction** with the status kept —
+never on blur, because the status buttons sit beside the fields and a
+correction written on the way to pressing one would be corrected again at
+once, which `rc_record_actual()` refuses. The function takes it as `p_task`,
+the sixteenth argument; the fifteen-argument signature is dropped above it.
+
+### Who said it and who typed it are different facts
+
+**Who said it and who typed it are different facts.** Most days somebody
+speaks and somebody else enters it, and an outcome attributed to whoever
+typed it is how a record stops being trusted. `outcomeDetail()` shows
+`created_by` only where it differs from the person the outcome is about,
+which is the only case anybody wonders about — and it is one function because
+the table and the meeting must never read differently.
+
+### The digest carries no rate and no score
+
+**The digest carries no rate and no score.** `digestText()` answers the three
+questions a huddle asks — what happened, what is next, what is still in the
+way — as plain text somebody pastes into whatever the project talks in, and
+it names the people nothing was recorded for rather than leaving a gap. KPIs
+are a different audience and a different permission; the moment a digest puts
+a percentage against a name it stops being a summary and becomes a review, in
+a channel the whole project reads.
+
+### A carry chain has to survive being rolled forward
+
+**A carry chain has to survive being rolled forward.** The chain is keyed on
+the plan entry a carry came from, and carrying a task into tomorrow makes a
+*new* entry — so without `rc_plan_entries.carry_chain_id` the next carry
+starts a fresh chain and a five-day stuck job reads as five separate failures
+by one person, which is the opposite of what the chain is for. Read it with
+`carryChainFor()`, which answers the entry's existing chain or starts one,
+and `rollForward()` is the single place that writes tomorrow's row — repeating
+a task and carrying one over write the same row, and only the chain tells
+them apart afterwards.
+
+### The week plan is one tab, and it used to be two
+
+(All seven days are drawn every week, Saturday and Sunday shaded down the whole
+column — commissioning runs possessions on exactly those days, and a switch to
+show them meant they were usually hidden. Each column is headed with the day's
+name beside its date.)
+
+**The week plan is one tab, and it used to be two.** "Week plan" drew the
+team's week from the plan's side; "Resources" drew the same rows per person
+with what the 4WLA asked for beside them. People down and days across in both
+cases, over the same `rc_plan_entries`, through the same `assignmentIndex()` —
+the same table with a different subtitle, and each one missing something the
+other had, so whichever you opened the answer you wanted was on the other.
+`ui/rc_week.js` is the merge and `ui/rc_resources.js` is gone. It carries every
+load-bearing part of either: every task on a day rather than the first of them;
+what the sheet asked for where a stored entry disagrees with it (the one case
+worth drawing twice, since agreeing is now the normal case); the huddle's
+recorded outcome against each task, read-only, because the meeting is an
+administrator's screen and without this a member could not see what was said
+about their own work; the can-be-staffed row that stops work being promised for
+a day nobody can cover; and the names and places the registers cannot resolve.
+Everything it writes is an `rc_plan_entries` row, the same rows the huddle
+reads and the reports group by. Off-project work belongs here too — a day in
+the office, a day on another project — and `Office` and `Other project` are
+seeded categories for it: without somewhere for those days to go the huddle
+shows a blank against a name with no way to tell "nothing planned" from
+"nothing said". A span of days becomes one row per day, and days already
+planned, on leave or not worked are skipped and counted rather than doubled.
+
+### A day the 4WLA cancels reaches the week plan by itself
+
+A cancellation painted in the look-ahead used to stop at the look-ahead. The
+week plan derived who is on what from the Resource row and never looked at what
+the activity line's paint *said*, so a red day drew the team on it as an
+ordinary day shift — and it read the sheet once, when the tab was opened, so
+even a correct reading arrived only when somebody happened to reopen it.
+
+Now a derived day carries `cancelled` from `assignmentIndex()`, by
+`cancelledOn()` — a meaning matching /cancel/, or a day stored as the bare
+`#hex` of a legend entry that is one (`lookaheadWithResources()` names those),
+which is the rule `rc_cancelled_days` counts the log by, so the log and the plan
+cannot disagree about a day. The day is still drawn, struck through with a
+"Cancelled" badge: somebody was going to be there, and a blank would not say
+why. A Resource row's red never reaches `cells` (see *The look-ahead now says
+who*), so marking the names is still not a cancellation.
+
+The week plan and the phone's week follow the bell as the look-ahead view does
+— `watchForNewReading()`, now in `ui/rc_util.js` and shared by all three — and
+redraw once the newer reading is published, which the editor does a couple of
+seconds after the painting stops. An edit that has not been published yet is
+not a reading, and changes nothing on them. One watch per screen: a tab that
+redraws in place (stepping a week) replaces its watch rather than adding one.
+
+### The huddle reads the same index, so half the team stops reading as unplanned
+
+**The huddle reads the same index, so half the team stops reading as unplanned.**
+`planFor()` is `assignmentIndex().at`, so "Was planned" is populated from the
+4WLA wherever nobody stored a row — before that the meeting asked half the team
+what they had been planned for and answered "nothing", while the workbook said
+exactly what. It reads both the reviewed week and the planned one
+(`lookaheadWithResources`), because on a Friday those are different weeks and a
+read for one cannot say who was wanted in the other.
+
+### Linking an account before it exists is normal, not a failure
+
+**Linking an account before it exists is normal, not a failure.**
+`rc_link_account()` used to refuse with "no account exists for x — invite them
+first", which was the commonest answer by a wide margin and the wrong
+sentence: the address *had* been invited and the person had simply not signed
+up, so the refusal named no action the reader could take and the button read as
+broken. It now aims the open invitation at that roster row and returns null —
+"arranged, not linked", which the caller says out loud — and
+`rc_accept_invitation()` finishes the job when they sign up. Only an address
+with neither an account nor an open invitation refuses, and the interface
+points at "Invite somebody" when it does.
+
+### The calendar is the team's; the register around it is not
+
+**The calendar is the team's; the register around it is not.** The 4WLA was
+administrators-only, so the people named on it were the only people who could
+not look at it — they asked their manager for a screenshot. `rc_lookahead_snapshots`
+and `rc_lookahead_rows` are now readable by anybody signed in and written only
+by an administrator; `rc_ingest_runs`, `rc_change_events`, `rc_sars` and the
+annotations stay admin-only, because those are the evidence base for a delay
+claim rather than a statement of what the team is being asked to do. The tab
+shows non-admins the Calendar section alone — no Check now, no legend editing
+— and the sections they cannot read are not offered, since a section that
+comes back empty is a door onto a wall. The PDF export *is* theirs: it is a
+drawing of what they can already see.
+
+### A member plans their own days, and takes them back
+
+**A member plans their own days, and takes them back.** `rc_plan_entries`
+checks `rc_can_act_for(person_id)`, the rule an outcome already followed, and
+`rc_supersede_plan()` and `rc_withdraw_plan()` ask the same question of the row
+they are changing — whoever may plan a day may correct it and remove it, or
+writing one somebody cannot fix is the "no way back" trap this schema avoids
+everywhere else. In the week plan the person select holds the one name they
+could write and the per-task Edit and Delete buttons appear on their own row
+only. A viewer plans nobody, including themselves, because `rc_can_act_for()`
+is false for them.
+**"Delete" is a write.** There is no DELETE grant on `rc_plan_entries` and
+there is not going to be: a plan that changed the evening before the shift is
+what a claim is built from, and a row that can be removed is a record that can
+be edited. So `rc_withdraw_plan()` writes a tombstone superseding the original
+and carrying `withdrawn`, and `rc_plan_current` drops the pair — the day leaves
+the schedule while the table still says it was planned and then withdrawn, by
+whom and when.
+
+### A member reads the plan and never writes it
+
+**A member reads the plan and never writes it.** The timeline holds the P6
+narrative and is maintained by whoever runs the project; the calendar's members
+are the field team. They were read-only in practice, because the plan lives in
+a folder and somebody else usually held the pen — which is not the same thing,
+because the pen is a *turn*: "Take over editing" was on screen and a member who
+pressed it got the plan. `core/access.js` held one boolean and a reason, which
+`main.js` stated from the calendar's role, and `core/store.js` and
+`core/filestore.js` refused edits and the pen while it was set.
+
+*Retired with the accounts.* No build has had a calendar role since the
+calendar moved into the folder, so nothing set the lock and every branch that
+read it was unreachable; the lock and those branches are gone. Who may edit the
+plan is the pen, and beneath it the folder's sharing — a read-only OneDrive
+share cannot write. `core/access.js` keeps only the reader's own view, below.
+
+### Reports, Organisation and the Daily huddle are an administrator's, and the tabs say so
+
+**Reports, Organisation and the Daily huddle are an administrator's, and the
+tabs say so.** The KPIs are a different audience and a different permission;
+the roster, the locations and the accounts are the calendar's administration
+rather than its use. Reports and Organisation are restricted in the policies —
+hiding the tab only stops offering a door onto a wall, which is the same thing
+`rc_effort`'s `rc_is_admin()` already did to anybody who reached the view
+directly. **The huddle is a different argument**: a member could use it, and
+there is nothing there for them to use. It is the meeting — it asks a whole
+team in turn how yesterday went, and it is the one path an outcome is recorded
+through. What a member needs out of it is the status and the note recorded
+against their own work, and that is drawn in the week plan beside the rest of
+their week, read-only, because there must be one recording path and not two
+that can disagree on screen.
+
+### A day is a list of tasks, not a task
+
+**A day is a list of tasks, not a task.** A shift is routinely two jobs — a
+test to witness in the morning and a cable pull after it — and a day that
+could hold one is how somebody ends up with one of the three things they were
+asked for. `assignmentIndex()` answers `on(person, iso)` with every entry, and
+`at()` with the first for the one caller that needs a single row: an outcome
+points at one plan entry and a carry carries one chain. The week plan, the
+week plan's cell, the huddle's "Was planned" and the digest all draw the list;
+`assign()` adds to a day rather than skipping it, and the derived side emits
+every look-ahead row naming somebody that day rather than the first with a
+count beside it.
+
+### There is one place a day is planned
+
+**There is one place a day is planned.** It was two: the old week plan's "+"
+opened a dialog to pick a look-ahead row and write it down, which outlived the
+change making the 4WLA *be* the plan — everything the sheet names is already
+somebody's plan without anybody pressing anything, so the button only ever
+wrote down what the sheet already said, or invented a day it said nothing
+about. Now the merged week plan is that one place: "+ task" plans a day the
+sheet has never heard of, and a drawn task carries "Edit" or, on a derived day,
+"Override" — labelled that because writing the first stored row against a day
+the sheet is asserting is a decision taken against the workbook. Per task
+rather than per cell, since a cell routinely holds two.
+
+### When the sheet moves a task, the task moves
+
+**When the sheet moves a task, the task moves.** A stored entry carrying a
+`lookahead_row_id` is somebody having confirmed or overridden what that row
+said; when a later read puts a different name on the same row for the same
+day, the work has moved, and leaving the entry where it was is how somebody
+turns up for a shift that is not theirs while the person who now has it has a
+blank against their name. `reassignments()` in `core/lookahead.js` derives it,
+with the name lookup **injected** for the reason `rowsFrom()` takes `locate` —
+so the whole thing is tested with no browser and no network. It refuses to
+decide unless it is certain: the row has to name somebody on that day (the
+sheet going quiet is not a reassignment, and a task cannot move to nobody),
+exactly one person, every name on the day resolved, and somebody other than
+whoever has it. `rc_reassign_plan()` does the write as a supersede carrying
+`reassigned_from`, so the outgoing row stays and the week plan badges the new
+one "Reassigned from Dana" — the thing worth knowing is that it *moved*, and
+once the sheet has moved on there is nothing left to derive that from. Applied
+at **ingest**, not at paint time: it is a write, and that is the one moment
+somebody deliberately asked the sheet what it says now.
+
+### Being scheduled is a different fact from what somebody may do
+
+**Being scheduled is a different fact from what somebody may do.**
+`rc_people.scheduled` is what the huddle and the week plan filter on
+(`listPeople({ scheduledOnly: true })`), never the role. A manager
+administers the calendar and is never assigned to a location, but deriving
+that from `role = 'admin'` would drop an administrator who *does* take shifts
+out of the meeting the moment they were promoted, with no way back short of
+demoting them. The column defaults to true for everybody; `rc_schema.sql`
+stands down the administrators that already exist when it is applied, once,
+and the Add-person dialog merely *suggests* the same for a new one.
+
+### An invitation link points at the site, not at the window it was made in
+
+**An invitation link points at the site, not at the window it was made in.**
+`location.origin` inside the desktop shell is `tauri.localhost`, so an
+invitation generated from the installed application copied an address that
+means nothing in anybody else's browser — and the only symptom was a
+colleague saying the link did not work. `joinLink()` uses
+`CX_SHELL.channel`, the deployment the shell already follows for updates,
+and falls back to the address bar in a browser where that is the right
+answer. A desktop build with no channel has no site to name, so it says so
+rather than copying something broken.
+
+### Adding somebody to the calendar never needs the SQL editor
+
+**Adding somebody to the calendar never needs the SQL editor.** Invitations,
+linking an account to a roster row and changing a role are all
+`security definer` functions — `rc_invite`, `rc_revoke_invitation`,
+`rc_list_invitations`, `rc_link_account`, `rc_set_role` — driven from
+Organisation → Accounts. They are functions rather than table writes for the
+reason the whole schema is built on: a refused UPDATE matches nothing and
+reports success, so `rc_set_role` raises instead, and refuses the demotion
+that would leave nobody able to administer anything. Supabase Auth still
+holds the password, and that is deliberate — `auth.uid()` is what every
+policy keys on, so the permission model *is* the authentication and replacing
+it would mean rewriting all of it. What is managed in the application is who
+may have an account and what they may do with it, never the credential.
+
+### Plan data must never reach Supabase, and that is enforced rather than intended
+
+**Plan data must never reach Supabase, and that is enforced rather than
+intended.** It used to be structural — the desktop build has no backend at
+all, so it could not have sent anything — and putting a client back in the
+page would have made it a convention. So: a separate config key
+(`rcSupabaseUrl`, never `supabaseUrl`), a separate client module the plan's
+storage path never imports, a separate auth storage key, and
+`tools/smoke_calendar.js`, which edits the plan hard and asserts that nothing
+carrying plan content ever left — through the client *or* over the wire. That
+last check is the one that fails if somebody reaches across; every other
+check would still pass.
+
+### A blocked day is not an obstacle until somebody owns it
+
+**A blocked day is not an obstacle until somebody owns it.** `rc_actuals`
+says a day was lost and stops there — no owner, no date, no way to ask
+whether it is still true — so the huddle produced a list that only grew, and
+a list that only grows is one nobody reads. `rc_blockers` is raised once and
+never edited; `rc_blocker_updates` is append-only and its latest row is the
+state, read through `rc_blockers_current`. Taking one on, moving the date,
+chasing it and closing it are each a row, because "we told BART on the 4th
+and chased on the 9th" is the sentence a claim is built from and an UPDATE
+would erase every word of it. The owner is picked from **everybody**, not the
+scheduled roster: whoever chases a released possession is usually the manager,
+who is stood down from the meeting precisely because they take no work from
+it.
+
+### Asking for leave is a member's; answering is an administrator's
+
+**Asking for leave is a member's; answering is an administrator's.** Booking
+was administrators-only, which made the commonest thing anybody wants from
+this module something they had to get somebody else to type — so it went into
+the 4WLA instead, or nowhere, and "the sheet says they are off and nothing is
+booked" became the normal case. A member now inserts their own `rc_leave` row
+and it lands as `requested`; the *status is the permission*, and the policies
+are written on exactly that — a member's insert is pinned to `requested` for
+their own person id, and the only status their update can write is
+`cancelled`, so a request cannot approve itself and asking is still something
+you can take back. There is no second table: a separate list of requests would
+be a second answer to "is Dana off on Tuesday", and approving one changes a
+status rather than copying a row. **A request is not leave yet** —
+`availability()` returns it as `asked` alongside an unchanged state, because a
+member asking must not take themselves out of the schedule before anybody has
+decided. The PTO tab stands the open ones up in a section of their own, over
+the whole register rather than the four weeks on screen (a request for October
+made today is a thing to answer today), and the count is on the calendar's
+chrome — a request nobody is told about is a request that sits there. Nothing
+is written into the 4WLA by approving one: the sheet is somebody's to edit when
+the time comes, and the record is then what it agrees with.
+
+### Two families of status, never averaged
+
+**Two families of status, never averaged.** Completed / partial / carried are
+what somebody did; blocked / reassigned are what was done to them. A
+possession released late is not underperformance, and folding it in would
+make the number worse than useless — people would stop saying they were
+blocked. `rc_effort.signal` is where the split lives. Leave is a third thing
+again, which is why `rc_leave` exists: without it, absence gets silently
+distributed across the performance statuses.
+
+### Evidence is append-only, in the database
+
+**Evidence is append-only, in the database.** `rc_plan_entries` and
+`rc_actuals` have no UPDATE or DELETE grant, and neither does
+`rc_change_annotations` — a correction is a new row that supersedes the old.
+The revoke has to name `authenticated`, not just `public, anon`: with the
+privilege intact, RLS excludes the row instead, the statement matches nothing
+and the driver reports success, so somebody editing an annotation would be
+told it worked.
+
+### A plan is revised, never edited
+
+**A plan is revised, never edited.** `rc_supersede_plan()` writes a new row
+pointing at the old one, and `rc_plan_current` is what everything reads — the
+table underneath keeps every version, because "the plan changed the evening
+before the shift" is itself delay evidence. It refuses an entry that has
+already been revised, so two people editing one day get a refusal rather than
+one of them silently winning, and it carries `carry_chain_id` across for the
+same reason rolling a task forward does. A clickable cell in the week plan is
+the only way in, and it shows the history: a revision nobody can see is an
+edit with extra steps.
+
+### A SAR is recorded, filed and linked in that order, and each step can fail alone
+
+**A SAR is recorded, filed and linked in that order, and each step can fail
+alone.** The row first, then the upload, then the move out of `sars/inbox/`:
+a PDF uploaded but not moved is a duplicate somebody can see, while a PDF
+moved before its row existed is a file nobody can find. What a SAR *covers*
+is confirmed by hand from the rows at that location in that week — one SAR
+covering several rows is expected, not an ambiguity — and never matched on
+activity text, which is worded differently on the two sides. Until this was
+wired, `rc_rows_without_sar` reported every row as having no access for ever,
+which is worse than not reporting it at all.
+
+### The phone app is the calendar alone, and the linker keeps it that way
+
+**The phone app is the calendar alone, and the linker keeps it that way.**
+`m/` is CX Calendar: **My week** (one person's days, and where they change
+their own plan), **Look-ahead** (the sheet one day at a time), **PTO** (ask
+for time off, see the answer, withdraw it while it is unanswered) and
+**More**. It is a second entry point, `src/mobile.js`, rather than a
+responsive mode of the application, because what it must *not* carry is the
+point — and a bundle can only be kept free of the timeline by never linking it
+in. `tools/build.js` refuses the store, the plan's three storage backends, the
+timeline, the plan exporters and the desktop calendar's router, naming the
+import chain; the answer to a refusal is to move the helper down a layer, never
+to widen what the phone may carry. It is also not the calendar bundle: it is
+standalone, with its own copy of what it reaches, because the phone has no
+main bundle to register into.
+
+### The phone app decides nothing of its own
+
+**The phone app decides nothing of its own.** A day's tasks are
+`assignmentIndex()`, how a task went is `outcomeLookup()`, availability is
+`availability()`, the day on the sheet is `agendaFor()` in `core/lookahead.js`,
+the sign-in is `ui/rc_gate.js`, and every write is the same `rc_plan_entries`
+row through the same `core/rc.js` — add, `supersedePlan()`, `withdrawPlan()`,
+and overriding a derived day by writing the first stored entry with its
+`lookahead_row_id`. So a task added on a phone is in the huddle exactly as one
+added at a desk, and `rc_can_act_for()` in Postgres is the control, as ever.
+PTO is the same single `rc_leave` row the desktop PTO tab answers:
+`requestLeave()` for a member, booked `approved` for an administrator's own,
+`updateLeave(…, { status: 'cancelled' })` to withdraw — never a second list of
+requests, and the policies already pin what each role may write. It reads
+through `leaveFor()`, one person's rows from today on.
+
+### A phone opening the site is sent to the phone app
+
+The site is the full calendar and the timeline, laid out for a screen. Opened
+on a phone it was the desktop page shrunk, and "Add to Home Screen" from it
+saved a bookmark — iOS and Android alike open that in a browser tab every
+time, because the page has no manifest and does not declare itself an app.
+The phone app (`m/`) does, so the same gesture there installs something that
+opens on its own, full screen.
+
+`phone.js` runs on the site before the bundle is fetched (plain script, not
+in the bundle — it has to beat 1.4 MB, and the policy allows no inline
+script) and sends a **phone** to `m/` with `location.replace()`, so Back does
+not bounce it there again. A phone is a touch screen whose shorter side is
+under 600 CSS pixels; a tablet is somebody running the huddle or the editor
+and stays. It acts only in the calendar shape — the plan has no backend, the
+calendar has one — because nowhere else is `m/` published. "Open the full
+site" in the app goes to `../?full=1`, which is kept on that phone until the
+app is opened again. The desktop shell drops the tag (`tools/desktop.js`): a
+desktop is never a phone, and the shell ships no phone app.
+
+A home-screen icon saved from the site before this is still a bookmark to the
+site: it now lands in the phone app, but in the browser. Remove it and add the
+app again from `m/`.
+
+### The phone's service worker keeps the app, never the data
+
+*Retired with the phone app (`docs/PLAN_ONEDRIVE_ONLY.md`); its stylesheet,
+`css/mobile.css`, went last.*
+
+**The phone's service worker keeps the app, never the data.** `m/sw.js`
+precaches the page, the bundle, the stylesheets and `config.js`, asks the
+network first for anything unhashed, never touches the calendar's origin, and
+is scoped to `m/` so the timeline passes it untouched — a longer-lived copy of
+what the calendar says would be a second answer to "what is on the server",
+which `core/rc.js`'s thirty-second memory exists to avoid. Offline, it opens
+and says it cannot reach the calendar. `tools/dist.js` publishes it **in the
+calendar shape only** (every other shape has no calendar for it to open),
+renames its bundle after its contents like the site's, and rewrites the
+worker's `PRECACHE` and `VERSION` to match. Its theme is its own
+(`mobile/theme.js`, localStorage, following the phone) because `ui/theme.js`
+imports the store. `css/mobile.css` is scoped to `.m-app` and `m-` classes,
+makes every modal a bottom sheet, holds form text at 16px so iOS does not
+zoom, and never writes a raw colour. The icons are drawn by
+`tools/pwa_icons.js`; regenerate rather than edit them.
+
+### Only the calendar reports its failures, and only from named places
+
+`rc.reportError(area, err)` writes a row to `rc_client_errors`, once per
+message per page and at most twenty, and never throws; Organisation → Problems
+lists them. It is called from specific call sites — a tab that failed to load,
+an offline outcome the server refused, a look-ahead read that went wrong —
+and **never from a global error handler**: an error thrown anywhere in the page
+can carry plan text, and plan data must never reach Supabase. The table is
+insert-own-row, admin-read, no update or delete; clearing goes through
+`rc_clear_client_errors()`.
+
+### Progress comes back from the huddle as actual dates, offered
+
+The huddle records who worked on what each day; the timeline has had
+`actualStart` / `actualEnd` fields since the inspector did, filled in by hand or
+not at all. "Progress from the calendar" joins them. `outcomeProgress()` in
+`core/lookahead.js` traces each worked outcome (completed, partial, carried —
+never blocked, reassigned or absent) to its look-ahead row, directly or through
+its plan entry, and from the row's label to the bars linked to suggestions with
+the same `suggestionKey()`. A day with no row falls back to its task text, which
+a day read off the sheet carries verbatim; either way the match is exact or
+nothing. The button reads afresh (`forgetReads()`): an outcome recorded
+seconds ago is the one somebody pressed it to see.
+
+A bar may stand for several activities, and each is read on its own — runs of
+one row are one activity, grouped by key. The actual start is the first day
+*any* of them was worked. The actual finish (the day after the last worked day,
+half-open like the bar) is offered only when **every** activity is done: nothing
+ahead of it on the look-ahead, and its own last word "completed". One activity
+finishing is not the bar finishing, and an activity nobody has recorded against
+holds the finish back as surely as one marked partial — pooling the outcomes and
+reading only the last day across all of them offered a finish while half the
+work was still open. The dialog says which activities a held finish waits on,
+always; the per-activity breakdown (days, span, last word, and Done / Still
+planned / Not completed / Nothing recorded) is shown or hidden per bar, and
+"Show each activity" opens or closes them all and is remembered in this
+browser's storage — a convenience, so a refused storage only means it starts
+hidden.
+
+A date nobody set starts ticked; one that would replace a typed date does not.
+Applying is one undoable edit, and nothing is sent to the calendar.
+
+### An administrator works from one list
+
+Organisation opens on **Inbox** the first time in a session (`ui/rc_inbox.js`):
+leave to answer (approved or declined in place — one update either way), names
+and locations on the next five weeks of the look-ahead the registers cannot
+place, colours the legend does not explain, support codes nobody registered,
+cancellations with no reason, blockers nobody owns, invitations expired or not
+taken up, problems reported this week and a database behind the application.
+None of it is new information; each item is a press from the screen that
+answers it. Every source is read on its own, and one that fails is reported as
+a line of its own — "nothing is waiting" and "I could not look" are different
+answers. The Organisation tab carries the count, remembered for a minute
+because the header redraws on every write and the inbox reads a dozen sources.
+
+### Seeing it as somebody else is a preview, refused at the client
+
+"View as…" lets an administrator see the calendar as a member or a viewer
+(`rc.previewAs()`): `me()`, `role()`, `isAdmin()` and `canWrite()` answer as
+that person, so every screen draws what they would get, and a banner above
+every tab says so and leads back. **Every write is refused in `core/rc.js`
+before it leaves the page** — `insert`, `update`, every function that is not a
+known read, settings, the legend, uploads and error reports — with an error
+carrying `preview: true`, and the huddle does not queue such a refusal for
+replay (it would replay as the administrator). The database is not asked to
+pretend: it still answers as the administrator, so a preview shows somebody's
+screens, not a proof of what their account could read — that proof is
+`supabase/test/rc_permissions.sql`. An administrator cannot preview another
+administrator, and the file lock's display name never takes a previewed name.
+
+### My day is where the team opens the calendar
+
+Members and viewers land on **My day** (`ui/rc_myday.js`): today and the next
+working day by their own working days, each task with where, which shift and
+who else is on the same look-ahead row that day — matched on the row, never on
+the wording — then the week at a glance, the last outcome recorded against them
+and the blockers they are chasing. It is a reading of `assignmentIndex()`, the
+same one the week plan and the huddle make, so it cannot disagree with them.
+**It records nothing.** The huddle is the one path an outcome is entered
+through, and a second one here would be two that could disagree on screen.
+
+### What changed for me is two readings compared, and Got it is append-only
+
+My day opens on what changed for the person since the reading they last
+acknowledged, for their days from today to four weeks out
+(`changesForMe()` in `core/lookahead.js`): **added**, **taken off**, **given
+to** somebody else, **moved** (a day of the same activity off and another on,
+within a fortnight, paired nearest first), **cancelled**, **back on** and
+**shift changed** — in words, by date. Both sides are the stored
+`rc_lookahead_rows` of one reading each, which compaction never touches, so any
+old reading can be compared; a reading is a complete statement of the weeks it
+covers, so nothing is merged across readings.
+
+**Got it** is a row in `rc_la_seen`: the person, the reading, when, and how
+many changes were on screen. Anybody on the team adds one for themselves — a
+viewer too, since being told is not writing the plan — nobody updates or
+deletes one, and only an administrator reads the team's. The first visit
+records the reading on screen as the starting point, and a new reading that
+changes none of the person's days is recorded quietly, because there was
+nothing to see; neither happens while previewing. The My day tab counts what
+is waiting, and the administrator's inbox lists who has changes they have not
+seen and who has never opened My day. Reminders stay inside the application:
+nothing is emailed from it, by design.
+
+### The published bundles are minified; the committed ones are not
+
+`tools/dist.js` minifies every bundle and stylesheet it publishes (esbuild,
+`minifyFile()`), after every literal it rewrites (`CALENDAR_BUNDLE`,
+`CALENDAR_CSS`) and before anything is named after its bytes, so the hash is of
+what is served. The repository's bundles stay the linker's readable output, and
+CI still compares them byte for byte with the source. Names are not kept: a
+reported failure records its area and message, never a stack, and `keepNames`
+cost the main bundle a twentieth of its size. esbuild is the one build-time
+dependency; `dist.js` refuses to run without it rather than publish bundles
+twice the size, so the deploy job runs `npm ci`. CI drives `smoke.js` and
+`smoke_calendar.js` once more against `dist/` (`CX_SITE=dist`), because the
+repository's copies are not what anybody downloads.
+
+### The Supabase client is fetched when a client is made
+
+`vendor/supabase.js` used to be a blocking tag ahead of the bundle, so every page
+— the plan included, which has no backend in any shape this is deployed in —
+parsed 200 kB of library before the timeline could start. `core/sdk.js` now
+injects it the first time `core/cloud.js` or `core/rc.js` makes a client, from
+their `init()`, which was already async and already after the desktop trial
+gate. `init()` shares one start between callers, so two of them during the
+download make one client, not two. The phone app still loads it by tag — its
+first screen is the calendar — and `loadSupabase()` then finds the global and
+fetches nothing. No page names the file in a tag any more, so `dist.js` and
+`desktop.js` only decide whether the file is shipped.
+
+### A policy asks who is asking once per query
+
+Every policy wraps `auth.uid()` and the identity helpers (`rc_is_admin()`,
+`rc_me()`, `rc_my_role()`, `is_admin()`) in a sub-select. Bare, Postgres calls
+them for every row the table holds — and they are `SECURITY DEFINER`, so they
+cannot be inlined: a read of `rc_la_cells` ran one `rc_people` query per cell.
+Wrapped, each is an InitPlan, evaluated once per statement. Both permission
+suites fail on a bare call, naming the policy. A helper that takes the row
+(`rc_can_act_for(person_id)`) is per row by nature and is left alone.
+
+### Every foreign key that names a calendar row has an index
+
+Retiring a person, a location, a category or a party asks Postgres for rows
+that still point at it, and so does every join along a key and every "what
+superseded this" in `rc_plan_current`. Without an index under the key each of
+those is a scan of the referencing table. `rc_schema.sql` indexes every foreign
+key that names a calendar row; the who-did-it stamps that point at
+`auth.users` are left alone — an account is never deleted under its rows and
+nothing is looked up by them, so an index there is write cost alone.
+`rc_permissions.sql` fails when a key arrives without one.
+
+### Paged reads ask for the count, then the rest together
+
+`selectAll()` asks for an exact count with its first page and fetches the other
+pages at once; a sheet of four pages was four round trips end to end. A page
+that comes back full after them — rows written between the count and the read —
+is followed one at a time, as before, so a stale count loses nothing. Every
+caller orders by a unique key, which is what makes the pages line up.
+
+### The site keeps the timeline for when there is no network, never the plan
+
+`sw.js` keeps the page, the main bundle, the stylesheets it links, `config.js`
+and `phone.js`, so the timeline opens offline — in file mode the plan is already
+on the machine. It keeps neither the plan nor anything only the calendar needs:
+the calendar cannot work without its server, says so offline, and precaching
+its bundle or the Supabase client would download for everybody what only its
+users fetch. It leaves `m/` (the phone app's own worker) and `desktop/` (the
+update channel) to the network. Hashed files are answered from the cache, the
+page and anything unhashed from the network first. `dist.js` stamps the hashed
+names and a version derived from them, as it does for `m/sw.js`. It is not
+registered in the desktop app, whose page is on disk and whose updates are its
+own, nor from a `file://` page.

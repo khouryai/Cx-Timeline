@@ -20,7 +20,7 @@ import { refreshPane, iconBtn } from './pane_util.js';
 
 export function paneBackups(root) {
   root.appendChild(
-    el('div', { style: { display: 'flex', gap: '6px', marginBottom: '11px' } }, [
+    el('div', { class: 'cx-btn-row' }, [
       el('button', {
         class: 'cx-btn mini primary',
         html: icon('save', { size: 12 }) + '<span>Back up now</span>',
@@ -51,7 +51,7 @@ export function paneBackups(root) {
     for (const backup of backups) {
       list.appendChild(
         el('div', { class: 'cx-listrow' }, [
-          el('span', { style: { display: 'flex', color: 'var(--text-subtle)' }, html: icon('save', { size: 11 }) }),
+          el('span', { class: 'lr-icon', html: icon('save', { size: 11 }) }),
           el('div', { class: 'lr-main' }, [
             el('div', { class: 'lr-title', text: backup.name || 'Project' }),
             el('div', { class: 'lr-meta', text: `${fmtTimestamp(backup.time)} · ${backup.objects} objects · ${backup.reason}${backup.size ? ' · ' + bytes(backup.size) : ''}` }),

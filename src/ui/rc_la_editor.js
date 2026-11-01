@@ -26,13 +26,12 @@
  * short list (`ui/rc_la_p6.js`, `core/la_p6.js`).
  *
  * Imports: util, rc, core/la_edit, core/la_p6, core/lookahead, io/lookahead,
- *          io/la_xlsx, io/exporters, filestore, icons, components, rc_util,
- *          rc_ingest, rc_la_state, rc_la_p6.
+ *          icons, components, rc_util, rc_ingest, rc_la_state, rc_la_p6,
+ *          rc_la_editor_state, rc_la_export (Export to Excel).
  */
 
 import { el, clear } from '../core/util.js';
 import * as rc from '../core/rc.js';
-import * as filestore from '../core/filestore.js';
 import * as ed from '../core/la_edit.js';
 import * as p6 from '../core/la_p6.js';
 import {
@@ -40,24 +39,22 @@ import {
   cancellationNoteFor, cancellationReasonText,
 } from '../core/lookahead.js';
 import { parseSheet, applyLegend, readLegend, isDark } from '../io/lookahead.js';
-import { lookaheadWorkbook, lookaheadFileName, lookaheadLatestName } from '../io/la_xlsx.js';
-import { provide4wla, scheduleSection } from './rc_la_schedule.js';
-import { saveFile } from '../io/exporters.js';
 import { icon } from './icons.js';
 import {
   toast, confirmDialog, contextMenu, openModal, textInput, selectInput, segmented, emptyState,
-  attachTooltip, checkbox,
+  attachTooltip,
 } from './components.js';
 import { notifyChanged, todayISO, nameRegister, foldName, codeNodes, authorNames } from './rc_util.js';
 import { publishFromEditor, publishDays, EDITOR_SOURCE } from './rc_ingest.js';
 import { la } from './rc_la_state.js';
 import { loadP6, openP6Picker, openP6Import, p6Words } from './rc_la_p6.js';
+import { E, META, fmt, legendInForce, ensureWindow } from './rc_la_editor_state.js';
+import { openExcelExport } from './rc_la_export.js';
 
 /* ══════════════════════════════════════════════════════════════════════════
    State
    ═══════════════════════════════════════════════════════════════════════ */
 
-const META = ed.FIELDS.length; // six activity columns, then the days
 const SAVE_BATCH = 400;
 const POLL_MS = 20000;
 /** While the bell is connected (`rc.lookaheadLive()`), a poll is only a check on it. */
@@ -73,54 +70,6 @@ const POLL_LIVE_MS = 120000;
  * stopped to think. The edit log keeps the fine detail either way.
  */
 const PUBLISH_QUIET_MS = 120000;
-
-/**
- * The editor's state, kept for the life of the page so a redraw of the tab —
- * which any calendar write causes — never loses the selection, the undo
- * history or unsaved work.
- */
-const E = {
-  model: null,
-  loaded: null, // { from, to } — the days whose cells are in the model
-  legend: [], // shift colours only: what the palette paints with
-  legendAll: [],
-  codes: [],
-  title: '',
-  start: null, // the Monday the window starts on
-  weeks: 4,
-  firstWritten: null, // the first day anything is written here — the editor holds nothing before its week
-  filter: '',
-  showArchived: false,
-  collapsed: new Set(),
-  anchor: { r: 0, c: META },
-  focus: { r: 0, c: META },
-  undo: [],
-  redo: [],
-  queue: [],
-  saving: null, // the save under way, if any
-  status: 'saved', // saved | saving | retry | conflict
-  retryIn: 0,
-  server: new Map(), // 'row:<id>' | 'cell:<row>|<day>' → the version the server holds
-  revision: 0,
-  dirtySincePublish: false,
-  publishTimer: null,
-  publishing: null, // the publish under way, so a flush can wait for it
-  publishError: null, // why the last publish failed, so Done editing can say so
-  pollTimer: null,
-  clip: null,
-  editing: null,
-  root: null,
-  view: null, // what is drawn: { rows, days, cols }
-  // Who is on the team, for the staffing check: a lookup from a written name to
-  // a person, and the leave booked in the calendar across the loaded days.
-  resolveName: null,
-  leave: [],
-  leaveKinds: new Map(),
-  staff: { issues: [], byCell: new Map() },
-  scroll: { left: 0, top: 0 },
-  // The schedule's activities and the reasons a row has none (`loadP6()`).
-  p6: { available: false, entries: [], flags: [], index: p6.p6Index() },
-};
 
 /* ══════════════════════════════════════════════════════════════════════════
    Entry
@@ -186,17 +135,6 @@ export async function renderEditor(host) {
   }
   draw();
   startPolling();
-}
-
-/** The legend as the editor paints with it: every row, and the shifts in force. */
-function legendInForce(rows) {
-  const all = rows.map((r) => ({ argb: String(r.argb).toUpperCase(), meaning: r.meaning, role: r.role || 'shift', valid_from: r.valid_from }));
-  const inForce = new Map();
-  for (const r of all) {
-    const held = inForce.get(r.argb);
-    if (!held || String(r.valid_from || '') > String(held.valid_from || '')) inForce.set(r.argb, r);
-  }
-  return { all, shifts: [...inForce.values()].filter((r) => r.role === 'shift' && r.meaning) };
 }
 
 /**
@@ -747,8 +685,8 @@ function toolbar(days) {
     iconButton('redo', 'Redo  (Ctrl+Y)', () => redo(), !E.redo.length),
     status,
     el('button', {
-      class: 'cx-btn mini primary', type: 'button', html: icon('download', { size: 12 }) + '<span>Export to Excel</span>',
-      onClick: () => openExport(),
+      class: 'cx-btn mini', type: 'button', html: icon('download', { size: 12 }) + '<span>Export to Excel</span>',
+      onClick: () => openExcelExport(),
     }),
     iconButton('settings', 'More', (e) => moreMenu(e)),
   ].filter(Boolean));
@@ -837,11 +775,6 @@ function iconButton(name, label, onClick, disabled = false) {
     class: 'cx-btn mini ghost icon', type: 'button', 'aria-label': label, title: label,
     html: icon(name, { size: 14 }), disabled, onClick,
   });
-}
-
-function fmt(iso) {
-  const d = new Date(`${iso}T00:00:00Z`);
-  return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', timeZone: 'UTC' });
 }
 
 async function moveWindow(delta) {
@@ -2851,195 +2784,6 @@ async function restoreDialog() {
       },
     ],
   });
-}
-
-/* ── Export ────────────────────────────────────────────────────────────── */
-
-function openExport() {
-  openExcelExport();
-}
-
-/**
- * What an export is built from. The editor's own state when it is open — it
- * holds exactly what was just typed — and otherwise the same rows and cells
- * read afresh, so the calendar's read view offers the identical workbook
- * without opening the editor, to anybody who can see the look-ahead.
- */
-async function exportSource() {
-  if (E.model) {
-    return { model: E.model, legend: E.legend, codes: E.codes, title: E.title, weeks: E.weeks, ensure: ensureWindow };
-  }
-  const [settings, legend, codes, rows] = await Promise.all([
-    rc.listSettings().catch(() => []),
-    rc.listLegend().catch(() => []),
-    rc.listSupportCodes({ includeRetired: true }).catch(() => []),
-    rc.listLaRows(),
-  ]);
-  const src = {
-    model: ed.makeModel(rows.map(ed.cleanRow), []),
-    legend: legendInForce(legend).shifts,
-    codes,
-    title: settings.find((r) => r.key === 'lookahead_title')?.value || '',
-    weeks: ed.WINDOW_WEEKS.includes(la.editorWeeks) ? la.editorWeeks : 4,
-    loaded: null,
-  };
-  src.ensure = async (days) => {
-    const from = days[0];
-    const to = days[days.length - 1];
-    if (src.loaded && from >= src.loaded.from && to <= src.loaded.to) return;
-    const cells = await rc.listLaCells(from, to);
-    src.model = ed.makeModel(rows.map(ed.cleanRow), cells.map(ed.cleanCell));
-    src.loaded = { from, to };
-  };
-  return src;
-}
-
-/**
- * The 4WLA as an .xlsx, built without asking — names rows included — filed as
- * `4WLA_Latest.xlsx` by the schedule in Export to Excel: every week written here, from the
- * first day anything was (`laCellSpan()`) to the last, and never less than this
- * week and the next three. `from` and `to` are the export's own dates, and
- * narrow it; weeks nothing was ever written in are never drawn, however far
- * back the dates reach. It used to be this week and the next three only, so
- * the record of what the look-ahead said went out of the file as each week
- * passed. Null until the look-ahead is written here: before that the workbook
- * in the folder is the 4WLA, and the editor's tables would be an old copy of
- * it — and null when the dates asked for hold nothing written.
- */
-export async function lookaheadFileNow({ from = null, to = null } = {}) {
-  const settings = await rc.listSettings().catch(() => []);
-  const said = (key) => settings.find((r) => r.key === key)?.value;
-  if (said('lookahead_source') !== EDITOR_SOURCE) return null;
-  const span = await rc.laCellSpan().catch(() => ({ first: null, last: null }));
-  const thisMonday = ed.mondayOf(todayISO());
-  const first = [span.first, thisMonday].filter(Boolean).sort()[0];
-  const last = [span.last, ed.addDaysISO(thisMonday, 27)].filter(Boolean).sort().pop();
-  const start = ed.mondayOf(from && from > first ? from : first);
-  const end = to && to < last ? to : last;
-  if (end < start) return null;
-  const weeks = Math.floor((Date.parse(end) - Date.parse(start)) / (7 * 864e5)) + 1;
-  const days = ed.windowDays(start, weeks);
-  const src = await exportSource();
-  await src.ensure(days);
-  const sheetName = said('lookahead_sheet') || '4WLA';
-  const bytes = lookaheadWorkbook({
-    model: src.model, days, legend: src.legend, codes: src.codes.filter((c) => c.active !== false), title: src.title, sheetName,
-    resources: true,
-  });
-  return { bytes, name: lookaheadLatestName(sheetName), from: days[0], to: days[days.length - 1] };
-}
-
-// 4WLA_Latest.xlsx on a schedule is built here; that module files it.
-provide4wla({ xlsx: () => lookaheadFileNow() });
-
-/** The 4WLA as an .xlsx — from the editor, or from the calendar's read view. */
-export async function openExcelExport() {
-  let src;
-  try {
-    src = await exportSource();
-  } catch (err) {
-    toast({ tone: 'bad', message: err.message, timeout: 10000 });
-    rc.reportError('lookahead:export', err);
-    return;
-  }
-  const thisMonday = ed.mondayOf(todayISO());
-  const starts = [-7, 0, 7, 14].map((d) => ed.addDaysISO(thisMonday, d));
-  const start = selectInput({
-    value: thisMonday,
-    options: starts.map((d, i) => ({ value: d, label: `${['Last week', 'This week', 'Next week', 'In two weeks'][i]} — from ${fmt(d)}` })),
-  });
-  let weeks = src.weeks;
-  const size = segmented({
-    value: weeks,
-    options: ed.WINDOW_WEEKS.map((w) => ({ value: w, label: `${w} weeks` })),
-    onChange: (w) => { weeks = w; update(); },
-  });
-  const summary = el('div', { class: 'rc-hint' });
-  const update = async () => {
-    const days = ed.windowDays(start.value, weeks);
-    await src.ensure(days).catch(() => {});
-    const rows = ed.rowsWithWork(src.model, days);
-    const n = rows.filter((r) => r.kind === 'activity').length;
-    summary.textContent = `${n} activit${n === 1 ? 'y' : 'ies'} with work between ${fmt(days[0])} and ${fmt(days[days.length - 1])}, `
-      + (la.exportResources
-        ? 'with their sections, names rows and the PTO / Office / Other group rows'
-        : 'with their sections — no names rows, and no PTO / Office / Other group rows')
-      + ' — in the 4WLA layout, ready to copy into the master file.';
-  };
-  const resourcesBox = checkbox({
-    label: 'Show resources — names under each activity, and the PTO, Office and Other group / project rows',
-    checked: la.exportResources,
-    onChange: (on) => { la.exportResources = on; update(); },
-  });
-  resourcesBox.classList.add('lae-export-resources');
-  start.addEventListener('change', update);
-  await update();
-
-  const canFolder = filestore.hasFolder?.();
-  const build = async () => {
-    const days = ed.windowDays(start.value, weeks);
-    await src.ensure(days);
-    const settings = await rc.listSettings().catch(() => []);
-    const sheetName = settings.find((r) => r.key === 'lookahead_sheet')?.value || '4WLA';
-    const bytes = lookaheadWorkbook({
-      model: src.model, days, legend: src.legend, codes: src.codes.filter((c) => c.active !== false), title: src.title, sheetName,
-      resources: la.exportResources,
-    });
-    return { bytes, name: lookaheadFileName(days, sheetName) };
-  };
-  openModal({
-    title: 'Export to Excel',
-    subtitle: 'The same columns, merged headings and colours as the 4WLA',
-    body: el('div', { class: 'lae-form' }, [
-      el('label', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'Starting' }), start]),
-      el('div', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'Weeks' }), size]),
-      resourcesBox,
-      summary,
-      // The same 4WLA, filed as 4WLA_Latest on a schedule for sending on.
-      scheduleSection(),
-    ]),
-    actions: [
-      { label: 'Cancel' },
-      canFolder ? {
-        label: 'Save to the shared folder', onClick: async () => {
-          try {
-            const { bytes, name } = await build();
-            await filestore.intakeWrite(`lookahead/${name}`, bytes);
-            toast({ tone: 'good', title: 'Saved to the shared folder', message: `lookahead/${name}` });
-          } catch (err) {
-            toast({ tone: 'bad', message: err.message, timeout: 10000 });
-          }
-        },
-      } : null,
-      {
-        label: 'Download', kind: 'primary', autofocus: true, onClick: async () => {
-          try {
-            const { bytes, name } = await build();
-            saveFile(name, bytes, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'Look-ahead');
-          } catch (err) {
-            toast({ tone: 'bad', message: err.message, timeout: 10000 });
-            rc.reportError('lookahead:export', err);
-          }
-        },
-      },
-    ].filter(Boolean),
-  });
-}
-
-/** Make sure the cells of a window outside the one on screen are loaded. */
-async function ensureWindow(days) {
-  const from = days[0];
-  const to = days[days.length - 1];
-  if (E.loaded && from >= E.loaded.from && to <= E.loaded.to) return;
-  const cells = await rc.listLaCells(from, to);
-  for (const c of cells.map(ed.cleanCell)) {
-    const key = ed.cellKey(c.row_id, c.day);
-    if (!E.model.cells.has(key)) {
-      E.model.cells.set(key, c);
-      E.server.set(`cell:${key}`, c.version || 0);
-    }
-  }
-  E.loaded = { from: [from, E.loaded?.from || from].sort()[0], to: [to, E.loaded?.to || to].sort().reverse()[0] };
 }
 
 /* ══════════════════════════════════════════════════════════════════════════

@@ -299,14 +299,24 @@ export function fmtDate(ms, preset = 'medium') {
   }
 }
 
-/** Human duration from a day count: "3d", "2w 1d", "4mo". */
-export function fmtDuration(days) {
+/**
+ * Human duration from a day count: "3d", "2w 1d", "4mo".
+ *
+ * A *duration* is counted the project's way, so on a working-day project a
+ * week is five of them. A distance between two dates — overdue by, starts in —
+ * is calendar days whatever the project counts, and says so with `calendar`:
+ * read on a five-day week, thirty days overdue came out as "6w".
+ *
+ * @param {number} days
+ * @param {{ calendar?: boolean }} [options]
+ */
+export function fmtDuration(days, { calendar = false } = {}) {
   const n = Math.abs(Math.round(days));
   const sign = days < 0 ? '−' : '';
   // A week is five days when durations are counted in working days, so ten of
   // them read as "2w" rather than "1w 3d". Pushed in by the store, like the
   // date order: this module is a leaf and cannot read a setting for itself.
-  const week = workWeek;
+  const week = calendar ? 7 : workWeek;
   const month = week * 4.348;
   const year = week * 52.18;
 

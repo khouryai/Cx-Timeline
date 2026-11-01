@@ -369,7 +369,7 @@ async function cancellationCalendar(events, from, to) {
   const span = `${dayLabel(from)} to ${dayLabel(last)}`;
   wrap.appendChild(el('div', { style: 'display:flex;gap:8px;align-items:center;margin:8px 0 10px;flex-wrap:wrap' }, [
     el('button', {
-      class: 'cx-btn mini primary la-cancel-xlsx',
+      class: 'cx-btn mini la-cancel-xlsx',
       type: 'button',
       html: `${icon('download', { size: 12 })}<span>Export to Excel</span>`,
       title: 'This calendar as an .xlsx: one row per activity, each cancelled run one cell with who and why',

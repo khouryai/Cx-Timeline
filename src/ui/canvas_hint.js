@@ -12,12 +12,16 @@
  * objects were packed) rather than working out visibility for itself, so it
  * cannot disagree with what is on screen.
  *
- * Imports: util, events, store, icons, commands, pane_util.
+ * A reader without the pen is told who has the plan rather than offered an
+ * Add that the store would refuse.
+ *
+ * Imports: util, events, store, filestore, icons, commands, pane_util.
  */
 
 import { el } from '../core/util.js';
 import { on, EV } from '../core/events.js';
 import * as store from '../core/store.js';
+import * as filestore from '../core/filestore.js';
 import { icon } from './icons.js';
 import * as cmd from './commands.js';
 import { goToPane } from './pane_util.js';
@@ -25,11 +29,17 @@ import * as renderer from '../timeline/renderer.js';
 
 let box = null;
 let shown = '';
+/** How many objects the last render laid out — the pen can change without a render. */
+let lastLaidOut = 0;
 
 export function installCanvasHint(frame) {
   box = el('div', { class: 'canvas-hint', hidden: true, role: 'status' });
   frame.appendChild(box);
-  on(EV.RENDER_DONE, (/** @type {{ objects?: number }} */ { objects } = {}) => update(objects));
+  on(EV.RENDER_DONE, (/** @type {{ objects?: number }} */ { objects } = {}) => {
+    lastLaidOut = objects ?? 0;
+    update(lastLaidOut);
+  });
+  on(EV.FILE_STATE, () => update(lastLaidOut));
 }
 
 function action(label, iconName, run, primary = false) {
@@ -60,12 +70,22 @@ function update(laidOut) {
   const actions = [];
 
   if (!doc.objects.length) {
-    key = `empty:${doc.lanes.length}`;
+    const readOnly = store.isDocReadOnly();
+    const holder = readOnly ? filestore.state().holder || '' : '';
+    key = `empty:${doc.lanes.length}:${readOnly}:${holder}`;
     title = 'An empty plan';
-    message = 'Add the first activity, or bring a plan in from a file or a P6 export.';
-    if (doc.lanes.length) actions.push(action('Add an activity', 'plus', () => cmd.createObject('activity'), true));
-    else actions.push(action('Add a lane', 'layers', () => cmd.addLane(), true));
-    actions.push(action('Import…', 'upload', () => goToPane('io')));
+    if (readOnly) {
+      // Nothing to offer: every Add would be refused. The read-only bar above
+      // is where the pen is asked for or taken.
+      message = holder
+        ? `Nothing has been added to this plan yet. ${holder} has it open, so it can be read here but not edited.`
+        : 'Nothing has been added to this plan yet, and it cannot be edited here.';
+    } else {
+      message = 'Add the first activity, or bring a plan in from a file or a P6 export.';
+      if (doc.lanes.length) actions.push(action('Add an activity', 'plus', () => cmd.createObject('activity'), true));
+      else actions.push(action('Add a lane', 'layers', () => cmd.addLane(), true));
+      actions.push(action('Import…', 'upload', () => goToPane('io')));
+    }
   } else {
     key = `hidden:${windowSet}:${hidden}:${filtering}`;
     title = 'Nothing in view';

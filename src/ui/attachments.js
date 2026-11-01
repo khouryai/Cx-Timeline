@@ -133,7 +133,7 @@ export async function detachFile(objectId, attachmentId) {
  * Supports click-to-pick and drag-and-drop.
  */
 export function attachmentList(objectId, { onChange = null } = {}) {
-  const root = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px' } });
+  const root = el('div', { class: 'cx-stack tight' });
   const list = el('div', { class: 'att-list' });
 
   const drop = el('div', {

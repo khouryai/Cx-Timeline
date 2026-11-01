@@ -332,7 +332,7 @@ function buildLinks(pane, obj) {
       if (!other) continue;
       list.appendChild(
         el('div', { class: 'cx-listrow' }, [
-          el('span', { style: { display: 'flex', color: 'var(--text-subtle)' }, html: icon(outgoing ? 'arrow' : 'arrow-left', { size: 12 }) }),
+          el('span', { class: 'lr-icon', html: icon(outgoing ? 'arrow' : 'arrow-left', { size: 12 }) }),
           el('div', { class: 'lr-main' }, [
             el('div', { class: 'lr-title', text: other.title }),
             el('div', { class: 'lr-meta', text: `${link.type}${link.lag ? ` ${link.lag > 0 ? '+' : ''}${link.lag}d` : ''} · ${fmtDate(other.start, 'medium')}` }),
@@ -386,7 +386,7 @@ export function openLaneDialog(id) {
 
   openModal({
     title: `Lane — ${lane.name}`,
-    body: el('div', { style: { display: 'flex', flexDirection: 'column', gap: '13px' } }, [
+    body: el('div', { class: 'cx-stack' }, [
       field('Name', textInput({ value: lane.name, onInput: (v) => set({ name: v }, 'Rename lane') })),
       field('Description', textInput({ value: lane.description, placeholder: 'Optional', onInput: (v) => set({ description: v }, 'Edit lane description') })),
       el('div', { class: 'cx-row' }, [

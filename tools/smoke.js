@@ -2241,6 +2241,141 @@ async function main() {
   await page.evaluate((t) => window.__CX_MODULES.req('ui/theme.js').applyTheme(t, { persist: false, syncDoc: false }), themeNow);
   await page.emulateMedia({ colorScheme: null });
 
+  /* Things that were drawn in the wrong place, or said the wrong thing, for
+     long enough that nobody saw them — on a fresh page, so the sample plan is
+     the one every one of them was found on. */
+  console.log('\nDrawn where it belongs');
+  {
+    const ctx = pinClock(await browser.newContext({ viewport: { width: 1600, height: 950 } }));
+    const fresh = await ctx.newPage();
+    fresh.on('pageerror', (err) => consoleErrors.push(`pageerror: ${err.message}`));
+    await fresh.goto(`http://localhost:${PORT}/index.html`, { waitUntil: 'load' });
+    await fresh.waitForSelector('.tl-obj', { timeout: 30000 });
+    await fresh.waitForTimeout(800);
+    const pane = async (id) => {
+      await fresh.evaluate((p) => window.__CX_MODULES.req('ui/panels.js').showPane(p), id);
+      await fresh.waitForTimeout(250);
+    };
+    /** Of the elements matching `sel`, those whose right edge passes the dock's scroller — and how many were measured, so finding none never passes. */
+    const pastDock = (sel) => fresh.evaluate((s) => {
+      const edge = document.querySelector('#dock .pane-scroll').getBoundingClientRect().right + 0.5;
+      const all = [...document.querySelectorAll(s)];
+      return {
+        measured: all.length,
+        out: all.filter((n) => n.getBoundingClientRect().right > edge)
+          .map((n) => n.textContent.trim() || n.getAttribute('aria-label') || n.tagName),
+      };
+    }, sel);
+
+    // A row's hidden actions used to take their room anyway, and cut every lane name to nine letters.
+    await pane('lanes');
+    const titles = await fresh.evaluate(() => [...document.querySelectorAll('#dock .lr-title')]
+      .map((t) => ({ text: t.textContent, cut: t.scrollWidth > t.clientWidth + 1 })));
+    const cut = titles.filter((t) => t.cut).map((t) => t.text);
+    check('every lane name is whole in the Lanes pane', titles.length > 5 && cut.length === 0, cut.join(', '));
+    await fresh.locator('#dock .cx-listrow').first().hover();
+    await fresh.waitForTimeout(250);
+    const shown = await fresh.evaluate(() => {
+      const row = document.querySelector('#dock .cx-listrow');
+      const actions = row.querySelector('.lr-actions');
+      const r = row.getBoundingClientRect();
+      const a = actions.getBoundingClientRect();
+      return getComputedStyle(actions).opacity === '1' && a.left >= r.left && a.right <= r.right + 0.5;
+    });
+    check('and pointing at a lane shows its actions, inside the row', shown);
+
+    await pane('palette');
+    const spilled = await pastDock('#dock .pane-scroll .cx-btn');
+    check('every Add Objects tool is on the pane', spilled.measured > 10 && spilled.out.length === 0,
+      `${spilled.measured} measured; past the edge: ${spilled.out.join(', ')}`);
+
+    await pane('filters');
+    const filterOut = await pastDock('#dock .pane-scroll input[type="date"]');
+    check('the Filters pane’s dates stay inside the dock', filterOut.measured === 2 && filterOut.out.length === 0,
+      `${filterOut.measured} measured; past the edge: ${filterOut.out.join(', ')}`);
+
+    // A late-finish arrow (z-index 140) shared a stacking context with the legend and painted across it.
+    const legendOnTop = await fresh.evaluate(() => {
+      const legend = document.querySelector('.tl-legend:not(.hidden)');
+      const canvas = document.querySelector('.tl-canvas').getBoundingClientRect();
+      const mark = [...document.querySelectorAll('.tl-canvas .tl-actual-shift, .tl-canvas .tl-shift')].find((m) => {
+        const r = m.getBoundingClientRect();
+        const cx = r.left + r.width / 2;
+        return r.width > 0 && cx > canvas.left + 10 && cx < canvas.right - 10 && r.top > canvas.top + 10 && r.top < canvas.bottom - 10;
+      });
+      if (!legend || !mark) return { ok: false, why: `${legend ? '' : 'no legend '}${mark ? '' : 'no shift arrow in view'}` };
+      const r = mark.getBoundingClientRect();
+      const x = r.left + r.width / 2;
+      const y = r.top;
+      const host = legend.offsetParent.getBoundingClientRect();
+      const saved = legend.getAttribute('style') || '';
+      Object.assign(legend.style, { left: `${x - host.left - 20}px`, top: `${y - host.top - 20}px`, right: 'auto', bottom: 'auto' });
+      mark.style.pointerEvents = 'auto';
+      const hit = document.elementFromPoint(x, y);
+      mark.style.pointerEvents = '';
+      legend.setAttribute('style', saved);
+      return { ok: Boolean(hit?.closest('.tl-legend')), why: hit?.className?.baseVal ?? hit?.className };
+    });
+    check('the legend is drawn over the canvas’s arrows, not under them', legendOnTop.ok, legendOnTop.why);
+
+    // A wrapped label dropped its own input below its neighbour's.
+    await fresh.locator('.tl-obj.shape-bar[data-label="Wayside Equipment Installation"]').first().click();
+    await fresh.waitForTimeout(300);
+    const askew = await fresh.evaluate(() => [...document.querySelectorAll('#inspector .cx-row')].flatMap((row) => {
+      const controls = [...row.children].map((f) => f.querySelector('input, select, textarea, .cx-input')).filter(Boolean);
+      const tops = controls.map((c) => Math.round(c.getBoundingClientRect().top));
+      return tops.length > 1 && Math.max(...tops) - Math.min(...tops) > 1
+        ? [[...row.querySelectorAll('.cx-label')].map((l) => l.textContent).join(' / ')] : [];
+    }));
+    check('fields side by side in the inspector line up, however their labels wrap', askew.length === 0, askew.join('; '));
+
+    // A distance to a date is calendar days; read on a five-day week, thirty days overdue said "6w".
+    const span = await fresh.evaluate(() => {
+      const req = window.__CX_MODULES.req;
+      const store = req('core/store.js');
+      const { fmtDuration } = req('core/dates.js');
+      const doc = store.getDoc();
+      const today = req('core/model.js').effectiveToday(doc);
+      const found = doc.objects.map((o) => ({ o, h: req('core/analysis.js').objectHealth(o, today) }))
+        .find(({ h }) => h.days && fmtDuration(h.days) !== fmtDuration(h.days, { calendar: true }));
+      if (!found) return null;
+      store.setSelection([found.o.id]);
+      return { title: found.o.title, calendar: fmtDuration(found.h.days, { calendar: true }), working: fmtDuration(found.h.days) };
+    });
+    await fresh.waitForTimeout(300);
+    const healthText = await fresh.locator('#inspector').innerText();
+    check('how long until a date, or since it, is counted in calendar days',
+      Boolean(span) && new RegExp(`(?:by|in) ${span.calendar}\\b|${span.calendar} ago`).test(healthText),
+      span ? `${span.title}: ${span.calendar} (a five-day week would say ${span.working})` : 'no object at a distance where the two differ');
+
+    // The theme is this computer's: switching it is not an edit to undo.
+    const depth = () => fresh.evaluate(() => window.__CX_MODULES.req('core/store.js').historyState().depth);
+    const before = await depth();
+    await fresh.evaluate(() => window.__CX_MODULES.req('ui/theme.js').applyTheme('light'));
+    await fresh.evaluate(() => window.__CX_MODULES.req('ui/theme.js').applyTheme('dark'));
+    check('switching the theme puts nothing in the history', (await depth()) === before, `${before} → ${await depth()}`);
+
+    // At 900px and under the sidebar is icons, and the switch and Present went with it.
+    await fresh.setViewportSize({ width: 860, height: 800 });
+    await fresh.waitForTimeout(400);
+    const narrow = await fresh.evaluate(() => {
+      const side = document.getElementById('sidenav').getBoundingClientRect();
+      const buttons = [...document.querySelectorAll('#sidenav .ws-btn, #sidenav .sidenav-present')];
+      return {
+        count: buttons.length,
+        out: buttons.filter((b) => {
+          const r = b.getBoundingClientRect();
+          return r.left < side.left - 0.5 || r.right > side.right + 0.5;
+        }).map((b) => b.getAttribute('aria-label')),
+        unnamed: buttons.filter((b) => !b.getAttribute('aria-label')).length,
+        words: buttons.filter((b) => b.querySelector('span')?.offsetParent !== null).length,
+      };
+    });
+    check('in a narrow window the workspace switch and Present fit the sidebar, as named icons',
+      narrow.count >= 2 && narrow.out.length === 0 && narrow.unnamed === 0 && narrow.words === 0, JSON.stringify(narrow));
+    await ctx.close();
+  }
+
   console.log('\nConsole');
   const meaningful = consoleErrors.filter((e) => !/favicon|fonts\.googleapis|net::ERR/i.test(e));
   check('no console errors', meaningful.length === 0, meaningful.slice(0, 4).join(' | '));

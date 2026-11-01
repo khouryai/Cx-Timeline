@@ -86,6 +86,9 @@ export async function tawrRequests(page, { check, shot = null }) {
   check('support adds across activities, the busiest day asked for, the witness left off',
     /2 x EIC, TCE/.test(await dayCard.innerText()) && !/witness/i.test(await dayCard.innerText()));
   check('hours combine to the earliest start and the latest finish', /0700–1700/.test(await dayCard.innerText()));
+  check('two days running with the same hours are said once, as a run',
+    /[A-Z][a-z]{2} \d{1,2}(?: [A-Z][a-z]{2})? – [A-Z][a-z]{2} \d{1,2} [A-Z][a-z]{2}: 0700–1700/.test(await dayCard.innerText()),
+    (await dayCard.locator('.rc-tawr-facts dd').first().innerText().catch(() => '')));
   check('the night shift at the same place is its own request, ROC on the OCC line',
     /OCC: ROC/.test(await cardFor('TPSS 12', 'Night').innerText()));
   check('a night with no hours takes the night shift\'s', /2200–0600 \(shift hours\)/.test(await cardFor('TPSS 12', 'Night').innerText()));

@@ -114,7 +114,7 @@ function importBar(register, count) {
     ]);
 
   return el('div', { style: { marginBottom: '12px' } }, [
-    el('div', { style: { display: 'flex', gap: '6px', flexWrap: 'wrap', marginBottom: '9px' } }, [
+    el('div', { class: 'cx-btn-row' }, [
       el('button', {
         class: 'cx-btn mini primary',
         html: icon('upload', { size: 12 }) + '<span>Import from P6</span>',
@@ -231,7 +231,7 @@ export function openImport(preset = 'progress') {
       el('div', { style: { marginTop: '11px' } }, [
         el('div', { class: 'cx-section-label', text: 'First rows' }),
         el('div', { class: 'cx-list' }, sample.map((a) =>
-          el('div', { class: 'cx-listrow', style: { cursor: 'default' } }, [
+          el('div', { class: 'cx-listrow static' }, [
             el('div', { class: 'lr-main' }, [
               el('div', { class: 'lr-title', text: a.name }),
               el('div', { class: 'lr-meta', text: `${a.id} · ${fmtDate(a.dates.start, 'medium')} → ${fmtDate(a.dates.end, 'medium')}` }),
@@ -243,7 +243,7 @@ export function openImport(preset = 'progress') {
 
   }
 
-  const body = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '13px' } }, [
+  const body = el('div', { class: 'cx-stack' }, [
     field('This import is', segmented({
       value: kind,
       stretch: true,
@@ -316,7 +316,7 @@ function openAdoptDialog(plan) {
 
   for (const item of affected) {
     rows.appendChild(
-      el('div', { class: 'cx-listrow', style: { cursor: 'default' } }, [
+      el('div', { class: 'cx-listrow static' }, [
         checkbox({
           label: '',
           checked: false,

@@ -420,6 +420,29 @@ async function main() {
   await page.waitForTimeout(1600);
   check('a reader never writes to the file', (await planText(page, 'bart-cbtc.json')) === untouched);
 
+  /* An empty plan, read without the pen: the canvas says who has it rather
+     than offering an Add the store would only refuse. */
+  await page.goto('about:blank');
+  await boot({
+    files: {
+      'bart-cbtc.json': {
+        text: JSON.stringify({ ...JSON.parse(sharedPlan), objects: [], links: [] }, null, 2),
+        lastModified: Date.now(),
+      },
+      'bart-cbtc.lock.json': {
+        text: JSON.stringify({ id: 'their-session', holder: 'Dana', since: Date.now(), beat: Date.now() }),
+        lastModified: Date.now(),
+      },
+    },
+  });
+  await openIoPane();
+  await page.locator('#dock .cx-btn', { hasText: /connect a folder/i }).click();
+  await page.waitForTimeout(1500);
+  const emptyHint = await page.locator('.canvas-hint').innerText().catch(() => '');
+  check('an empty plan read without the pen says who has it, and offers nothing to add',
+    /Dana has it open/.test(emptyHint) && (await page.locator('.canvas-hint .cx-btn').count()) === 0,
+    emptyHint.replace(/\n/g, ' / '));
+
   /* ── Two machines, one plan ───────────────────────────────────────────── */
   console.log('\nTwo machines with the same plan open');
   // The failure this design exists to prevent: both people editing. With one

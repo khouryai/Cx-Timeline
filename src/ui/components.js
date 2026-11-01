@@ -759,7 +759,7 @@ export function iconPicker({ value, onPick }) {
   search.addEventListener('input', () => render(search.value));
   render('');
 
-  return el('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px' } }, [
+  return el('div', { class: 'cx-stack tight' }, [
     search,
     grid,
     el('button', { class: 'cx-btn mini', text: 'No icon', onClick: () => onPick('') }),
@@ -808,7 +808,7 @@ export function colorControl({ value, onChange, allowInherit = false }) {
     html: icon('palette', { size: 13 }),
   });
   more.addEventListener('click', () => {
-    popover(more, el('div', { style: { display: 'flex', flexDirection: 'column', gap: '9px' } }, [
+    popover(more, el('div', { class: 'cx-stack tight' }, [
       el('div', { class: 'cx-label', text: 'Palette' }),
       swatchGrid({ value, onPick: (c) => { swatch.value = c; onChange(c); closePopover(); } }),
       allowInherit

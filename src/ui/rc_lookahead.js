@@ -31,7 +31,8 @@ import {
 
 import { la, WEEK_CHOICES } from './rc_la_state.js';
 import { checkNowButton, lookaheadSource, EDITOR_SOURCE, writtenView } from './rc_ingest.js';
-import { renderEditor, flushEditor, openExcelExport } from './rc_la_editor.js';
+import { renderEditor, flushEditor } from './rc_la_editor.js';
+import { openExcelExport } from './rc_la_export.js';
 import { renderLegend } from './rc_la_legend.js';
 import { renderChanges, renderSnapshots } from './rc_la_changes.js';
 import { renderCancellations } from './rc_la_cancellations.js';
@@ -446,7 +447,7 @@ async function renderCalendar(host) {
        Only once the look-ahead is written here — before that, the workbook in
        the folder is the file, and the editor's tables would be an old copy. */
     written ? el('button', {
-      class: 'cx-btn mini primary la-export-xlsx',
+      class: 'cx-btn mini la-export-xlsx',
       type: 'button',
       html: icon('download', { size: 12 }) + '<span>Export to Excel</span>',
       title: 'The look-ahead as an .xlsx in the 4WLA layout — the same export as in Edit.',
@@ -1359,9 +1360,12 @@ export async function lookaheadSheetsNow({ pdf = true, png = true, weeks = 4, to
 // The schedule in Export to Excel files them; that module is imported here, so it is handed over.
 provide4wla({ sheets: lookaheadSheetsNow });
 
+/* The exports are plain buttons. Red is for the one thing the page is for —
+   Check now, or Edit the look-ahead once the calendar writes it — and three
+   red buttons in one toolbar left nothing standing out. */
 function exportButton(context) {
   return el('button', {
-    class: 'cx-btn mini primary la-export-pdf',
+    class: 'cx-btn mini la-export-pdf',
     type: 'button',
     html: icon('download', { size: 12 }) + '<span>Export PDF</span>',
     title: 'Draw this calendar on one page — weeks, names and paper size are all choices.',

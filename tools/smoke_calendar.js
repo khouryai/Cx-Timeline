@@ -165,6 +165,11 @@ async function main() {
   console.log('\nThe look-ahead register');
   await page.locator('#rc-frame .rc-tab', { hasText: 'Look-ahead' }).click();
   await page.waitForSelector('#rc-frame .la-grid', { timeout: 10000 });
+  /* Red is for the one thing the page is for; the exports beside it are plain.
+     Three red buttons in one toolbar left nothing standing out. */
+  const reds = await page.locator('#rc-frame .cx-btn.primary:visible').allInnerTexts();
+  check('the look-ahead has one red button, and it is not an export',
+    reds.length === 1 && !/export/i.test(reds[0]), JSON.stringify(reds));
 
   /* A reading published on the other computer redraws this one as it lands:
      OneDrive brings the files down, the database reads them in, the bell

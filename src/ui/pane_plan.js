@@ -165,7 +165,7 @@ export function paneReleases(root) {
   for (const r of releases) counts[r.status] = (counts[r.status] || 0) + 1;
 
   root.appendChild(
-    el('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '5px', marginBottom: '10px' } },
+    el('div', { class: 'cx-chipstats spaced' },
       Object.entries(counts).map(([status, n]) => chipStat(statusOf(status).label, n, toneOf(status))))
   );
 
@@ -293,7 +293,7 @@ export function paneLinks(root) {
   const violations = linkViolations(doc);
 
   root.appendChild(
-    el('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '5px', marginBottom: '10px' } }, [
+    el('div', { class: 'cx-chipstats spaced' }, [
       chipStat('Links', doc.links.length, 'info'),
       chipStat('Broken', violations.count, violations.count ? 'bad' : 'good'),
       chipStat('Critical', analysis.critical.size, analysis.critical.size ? 'warn' : 'muted'),
@@ -317,7 +317,7 @@ export function paneLinks(root) {
   }
 
   root.appendChild(
-    el('div', { style: { display: 'flex', flexDirection: 'column', gap: '9px', marginBottom: '12px' } }, [
+    el('div', { class: 'cx-stack tight', style: { marginBottom: '12px' } }, [
       field('Connector style', segmented({
         value: doc.settings.connectorStyle,
         stretch: true,
@@ -408,7 +408,7 @@ export function paneBaselines(root) {
   const active_ = store.activeBaseline();
 
   root.appendChild(
-    el('div', { style: { display: 'flex', gap: '6px', marginBottom: '11px' } }, [
+    el('div', { class: 'cx-btn-row' }, [
       el('button', { class: 'cx-btn mini primary', html: icon('bookmark', { size: 12 }) + '<span>Take baseline</span>', onClick: () => cmd.takeBaseline() }),
       el('button', {
         class: 'cx-btn mini',
@@ -441,7 +441,7 @@ export function paneBaselines(root) {
           refreshPane();
         },
       }, [
-        el('span', { style: { display: 'flex', color: 'var(--text-subtle)' }, html: icon('bookmark', { size: 12 }) }),
+        el('span', { class: 'lr-icon', html: icon('bookmark', { size: 12 }) }),
         el('div', { class: 'lr-main' }, [
           el('div', { class: 'lr-title', text: baseline.name }),
           el('div', { class: 'lr-meta', text: isDerivedBaseline(baseline)
@@ -550,7 +550,7 @@ export function paneLegendSettings(root) {
   const stats = summarise(doc);
 
   root.appendChild(
-    el('div', { style: { display: 'flex', flexDirection: 'column', gap: '9px', marginBottom: '12px' } }, [
+    el('div', { class: 'cx-stack tight', style: { marginBottom: '12px' } }, [
       toggle({
         label: 'Show legend on the canvas',
         checked: doc.settings.showLegend,
@@ -613,7 +613,7 @@ export function paneHistory(root) {
   const state = store.historyState();
 
   root.appendChild(
-    el('div', { style: { display: 'flex', gap: '6px', marginBottom: '11px' } }, [
+    el('div', { class: 'cx-btn-row' }, [
       el('button', { class: 'cx-btn mini', html: icon('undo', { size: 12 }) + '<span>Undo</span>', disabled: !state.canUndo, onClick: () => { store.undo(); renderer.requestRender(); } }),
       el('button', { class: 'cx-btn mini', html: icon('redo', { size: 12 }) + '<span>Redo</span>', disabled: !state.canRedo, onClick: () => { store.redo(); renderer.requestRender(); } }),
     ])
@@ -643,7 +643,7 @@ export function paneHistory(root) {
           }
         },
       }, [
-        el('span', { style: { display: 'flex', color: 'var(--text-subtle)' }, html: icon('history', { size: 11 }) }),
+        el('span', { class: 'lr-icon', html: icon('history', { size: 11 }) }),
         el('div', { class: 'lr-main' }, [
           el('div', { class: 'lr-title', text: entry.label }),
           el('div', { class: 'lr-meta', text: `${fmtTimestamp(entry.time)} · ${entry.summary}` }),

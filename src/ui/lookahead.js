@@ -135,7 +135,7 @@ function importBar(register) {
   const calendar = calendarAvailable();
   return el('div', { style: { marginBottom: '12px' } }, [
     calendar ? calendarNotice(register) : null,
-    el('div', { style: { display: 'flex', gap: '6px', flexWrap: 'wrap', marginBottom: '9px' } }, [
+    el('div', { class: 'cx-btn-row' }, [
       calendar
         ? el('button', {
             class: 'cx-btn mini primary',
@@ -329,7 +329,7 @@ function openFollowDialog(moved) {
     const entry = store.getLookaheadActivity(item.id);
     if (!entry) continue;
     rows.appendChild(
-      el('div', { class: 'cx-listrow', style: { cursor: 'default' } }, [
+      el('div', { class: 'cx-listrow static' }, [
         checkbox({ label: '', checked: false, onChange: (v) => (v ? chosen.add(item.id) : chosen.delete(item.id)) }),
         el('div', { class: 'lr-main' }, [
           el('div', { class: 'lr-title', text: entry.title }),
@@ -379,7 +379,7 @@ function summary(doc, entries) {
     counts[state]++;
     if (state === 'placed' && entry.previous) moved++;
   }
-  return el('div', { class: 'cx-chipstats', style: { marginBottom: '11px' } }, [
+  return el('div', { class: 'cx-chipstats spaced' }, [
     chipStat('Suggested', counts.suggested, counts.suggested ? 'info' : 'muted'),
     chipStat('On timeline', counts.placed, counts.placed ? 'good' : 'muted'),
     moved ? chipStat('Moved', moved, 'warn') : null,

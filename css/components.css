@@ -1158,6 +1158,64 @@
   flex-wrap: wrap;
   gap: 6px;
 }
+.cx-chipstats.spaced {
+  margin-bottom: 10px;
+}
+
+/* ── Arrangements panes and dialogs repeat ─────────────────────────────── */
+/* Named once so they agree. Written inline, the same vertical stack had
+   drifted to gaps of 8, 9 and 13px, and the same row of buttons to 9, 10
+   and 11px below it. */
+
+.cx-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.cx-stack.tight {
+  gap: var(--space-2);
+}
+.cx-btn-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+/* A full-width button whose label starts at the left, like a menu entry. */
+.cx-btn.wide {
+  justify-content: flex-start;
+  width: 100%;
+}
+/* A list row that is read, not pressed. */
+.cx-listrow.static {
+  cursor: default;
+}
+/* The small grey icon a list row starts with. */
+.lr-icon {
+  display: flex;
+  color: var(--text-subtle);
+}
+/* A value shown in an input's shape that is not typed into. */
+.cx-input.readout {
+  display: flex;
+  align-items: center;
+  color: var(--text-muted);
+  cursor: default;
+}
+/* The inspector's chips across its top, and the sentence under them. */
+/* Its own class, not `.cx-chipstats`: it is the inspector's header band, and
+   the chip rows in its body are found by that class. */
+.ih-health {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 11px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.ih-health > .cx-hint {
+  width: 100%;
+  margin-top: 2px;
+}
 
 /* ── P6 register ───────────────────────────────────────────────────────── */
 

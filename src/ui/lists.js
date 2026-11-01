@@ -193,7 +193,7 @@ export function promptNewOption(listId, onDone = () => {}) {
   let color = '#5b93f5';
   let tone = 'neutral';
 
-  const body = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '13px' } }, [
+  const body = el('div', { class: 'cx-stack' }, [
     field('Name', labelInput),
     def.color ? field('Colour', colorControl({ value: color, onChange: (v) => { color = v; } })) : null,
     def.tone
@@ -453,7 +453,7 @@ export function listEditor({ listId = null, tabs: showTabs = true } = {}) {
     let settled = false;
     openModal({
       title: `Remove "${option.label}"`,
-      body: el('div', { style: { display: 'flex', flexDirection: 'column', gap: '13px' } }, [
+      body: el('div', { class: 'cx-stack' }, [
         el('div', { style: { fontSize: 'var(--fs-small)', color: 'var(--text-muted)' }, text: `${usage} object${usage === 1 ? '' : 's'} currently use this ${def.label.toLowerCase()}.` }),
         field('Move them to', selectInput({
           value: '',

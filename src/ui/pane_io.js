@@ -51,8 +51,7 @@ function sharedFolderSection() {
   const rows = [];
   const wideBtn = (label, iconName, onClick, primary = false) =>
     el('button', {
-      class: 'cx-btn mini' + (primary ? ' primary' : ''),
-      style: { justifyContent: 'flex-start', width: '100%' },
+      class: 'cx-btn mini wide' + (primary ? ' primary' : ''),
       html: icon(iconName, { size: 12 }) + `<span>${label}</span>`,
       onClick,
     });
@@ -153,8 +152,8 @@ function sharedFolderSection() {
         if (!stored) return;
         reconnect.appendChild(
           el('button', {
-            class: 'cx-btn mini',
-            style: { justifyContent: 'flex-start', width: '100%', marginTop: '6px' },
+            class: 'cx-btn mini wide',
+            style: { marginTop: '6px' },
             html: icon('refresh', { size: 12 }) + `<span>Reconnect to ${stored.folder}</span>`,
             onClick: () => cmd.reconnectFolder(),
           })
@@ -174,8 +173,8 @@ export function paneIo(root) {
     section('Export', [
       el('div', { class: 'cx-hint', text: 'PDF, print, SVG, PNG and JPEG all draw the same picture. What goes in it is up to you.' }),
       el('button', {
-        class: 'cx-btn mini',
-        style: { justifyContent: 'flex-start', width: '100%', marginBottom: '4px' },
+        class: 'cx-btn mini wide',
+        style: { marginBottom: '4px' },
         html: icon('sliders', { size: 12 }) + '<span>Drawing options…</span>',
         onClick: () => openExportOptions(() => refreshPane()),
       }),
@@ -195,8 +194,7 @@ export function paneIo(root) {
     section('Import', [
       el('div', { class: 'cx-hint', text: 'JSON restores a whole project. CSV, TSV and Excel files are mapped by column name — Microsoft Project CSV exports are recognised automatically.' }),
       el('button', {
-        class: 'cx-btn mini',
-        style: { justifyContent: 'flex-start', width: '100%' },
+        class: 'cx-btn mini wide',
         html: icon('upload', { size: 12 }) + '<span>Choose a file…</span>',
         onClick: chooseImport,
       }),
@@ -221,16 +219,15 @@ export function paneIo(root) {
 
   root.appendChild(
     section('Project', [
-      el('button', { class: 'cx-btn mini', style: { justifyContent: 'flex-start', width: '100%' }, html: icon('plus', { size: 12 }) + '<span>New project…</span>', onClick: () => cmd.newProject() }),
-      el('button', { class: 'cx-btn mini', style: { justifyContent: 'flex-start', width: '100%' }, html: icon('save', { size: 12 }) + '<span>Save a restore point</span>', onClick: () => cmd.saveSnapshot() }),
+      el('button', { class: 'cx-btn mini wide', html: icon('plus', { size: 12 }) + '<span>New project…</span>', onClick: () => cmd.newProject() }),
+      el('button', { class: 'cx-btn mini wide', html: icon('save', { size: 12 }) + '<span>Save a restore point</span>', onClick: () => cmd.saveSnapshot() }),
     ])
   );
 }
 
 function exportButton(label, iconName, onClick) {
   return el('button', {
-    class: 'cx-btn mini',
-    style: { justifyContent: 'flex-start', width: '100%' },
+    class: 'cx-btn mini wide',
     html: icon(iconName, { size: 12 }) + `<span>${label}</span>`,
     onClick,
   });
@@ -265,7 +262,7 @@ function openPdfDialog() {
   openModal({
     title: 'Export PDF',
     subtitle: 'Vector output — text stays selectable and the drawing stays sharp at any zoom.',
-    body: el('div', { style: { display: 'flex', flexDirection: 'column', gap: '13px' } }, [
+    body: el('div', { class: 'cx-stack' }, [
       field('Page size', selectInput({
         value: pageSize,
         options: exporters.PDF_PAGE_SIZES,
@@ -313,7 +310,7 @@ async function runImport(file) {
   if (result.kind === 'error') {
     openModal({
       title: 'Import failed',
-      body: el('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px' } }, [
+      body: el('div', { class: 'cx-stack tight' }, [
         el('div', { class: 'cx-hint', text: `${file.name} could not be imported.` }),
         ...result.errors.map((e) => el('div', { style: { color: 'var(--bad)', fontSize: 'var(--fs-small)' }, text: e })),
       ]),
