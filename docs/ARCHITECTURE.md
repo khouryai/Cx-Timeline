@@ -718,8 +718,8 @@ deciding against the sheet.
 
 ### PTO is a third reading, not a second store
 
-**PTO is a third reading, not a second store.** `ui/rc_pto.js` draws four
-weeks of the team and puts two things in each cell: what somebody booked in
+**PTO is a third reading, not a second store.** `ui/rc_pto.js` draws the
+team over two, four, eight or thirteen weeks and puts two things in each day: what somebody booked in
 `rc_leave` — a record, with a kind and a status — and what the 4WLA's PTO row
 says, which on this project is usually the only place an absence is written
 down at all. **They are drawn as one colour** (`--rc-pto`), and that is the
@@ -745,6 +745,36 @@ office days are scheduled on the look-ahead saw the PTO calendar fill with
 people who were exactly where the plan put them, read as lent to another
 group. An office day is this project's work; it reaches the week plan, the
 huddle and the reports as one, and PTO is only leave and work elsewhere.
+
+**It looks as far ahead as leave is booked.** Leave is arranged months out,
+and a fixed four weeks only showed a holiday once it was nearly here — so the
+window is the reader's choice (2, 4, 8 or 13 weeks, `PTO_SPANS`), from this
+week, a week either way, or the Monday of any date, kept while the calendar is
+open and never stored. It opens on four, the look-ahead's own window. The grid
+heads its days with the month, rules each Monday, and washes today's column
+(*Today is a column, not a hairline*); a stretch of the same leave, of PTO the
+sheet alone names, or of another group's work is **one bar** spanning its
+days with its kind written in where it fits whole — never cut short, the
+title carrying it either way — so a fortnight reads as a fortnight rather than
+fourteen squares, and clicking a stretch the sheet names books it whole. Past
+four weeks the day columns narrow, and past eight the weeks are dated by their
+Mondays only, so a quarter is on one screen with nothing to scroll; beside
+each name, how many days off the window holds; and "Only people with time off"
+leaves the empty rows out. **The list under it holds every record**, not only
+the window's: *In these weeks*, *From today on* (where it opens) or
+*Everything*, for one person or everybody, with *Show cancelled* making it the
+whole record Lists → Leave keeps. Each row says where it stands (booked, under
+way, taken, cancelled), the working days it takes on the person's own week,
+and *Show* puts the calendar on its weeks.
+
+**The PTO row is read past the newest reading.** A reading covers the week
+just gone and the four or five ahead, so a longer window reaches past it. Once
+the look-ahead is written in the calendar, the days the reading does not cover
+are read from the editor through the publish path (`writtenView()`), as the
+look-ahead's read view pages past its reading — never from `rc_la_*` some
+other way. While the workbook is still the look-ahead, its reading is all the
+sheet says, and the screen says so under the grid rather than letting a month
+past it read as nobody away.
 
 ### Who takes shifts decides who is in a view about work
 
@@ -2452,6 +2482,16 @@ reasons. Then the schedule: saved, it does not fire at once; a day later it
 exports by itself, once. The writer's typed cells and the schedule's rule are
 in `test_la_edit.js`, and `test_xlsx_compat.js` has LibreOffice Calc open the
 workbook and write every sheet back out.
+
+`smoke_pto.js` books leave two months out, a month gone and one cancelled,
+and reads them back: the spans offered and four by default, the month over its
+days, today washed as a column, a stretch of leave one bar with its kind in it;
+the list from today on, the window alone, everything, cancelled too, one
+person's, with working days; *Show* moving the calendar to the leave; eight
+and thirteen weeks each on one screen, the quarter reaching the leave two
+months out; "Only people with time off"; and a date's Monday. After the editor
+has adopted the look-ahead, a name written on its PTO row two months out —
+past the newest reading — is drawn on PTO.
 
 `smoke_delay_export.js` presses *4WLA + delay log*: the dialog's weeks and the
 last ten days to today, the count and the three file names; the download read

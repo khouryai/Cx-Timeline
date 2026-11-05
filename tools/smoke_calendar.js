@@ -31,6 +31,7 @@ import { tawrRequests } from './smoke_tawr.js';
 import { lookaheadP6 } from './smoke_la_p6.js';
 import { masterExport } from './smoke_master_export.js';
 import { delayExport } from './smoke_delay_export.js';
+import { ptoViews, ptoPastTheReading } from './smoke_pto.js';
 import { fixtureRows, seedFiles, installFolder, openCalendar, exposeDb, ME } from './lib/rc_folder.js';
 import path from 'node:path';
 import url from 'node:url';
@@ -826,7 +827,7 @@ async function main() {
     }));
   const elsewhereFor = (name) => page.evaluate((who) => {
     const row = [...document.querySelectorAll('#rc-frame .rc-pto-grid tbody tr')]
-      .find((tr) => tr.querySelector('.rc-pto-name')?.textContent === who);
+      .find((tr) => tr.querySelector('.rc-pto-person')?.textContent === who);
     return row ? row.querySelectorAll('.rc-pto-elsewhere').length : -1;
   }, name);
   check('a day on another group\u2019s project is on the PTO calendar',
@@ -855,6 +856,8 @@ async function main() {
   check('nothing about the look-ahead was written to do it',
     await page.evaluate(() => !window.__rc.calls
       .some((c) => c.kind === 'insert' && c.table === 'rc_lookahead_rows')));
+
+  await ptoViews(page, { check });
 
   /* ── The lists ────────────────────────────────────────────────────────── */
   console.log('\nThe lists');
@@ -1097,6 +1100,7 @@ async function main() {
   await lookaheadP6(page, { check, shot: process.env.CX_P6_SHOT || null });
   await masterExport(page, { check });
   await delayExport(page, { check });
+  await ptoPastTheReading(page, { check });
 
   /* ── A tablet ─────────────────────────────────────────────────────────
      The calendar is used standing up, and a tablet in landscape is wider than
