@@ -3,8 +3,9 @@
  * list, exported to Excel and as a PDF drawn the way the tab draws it.
  *
  * Runs inside `smoke_calendar.js` after the master export, so the look-ahead
- * is written in the calendar and the cancellation log holds days cancelled in
- * the ten days up to "today" (Wednesday 23 September 2026), with reasons.
+ * is written in the calendar and the cancellation log holds reasons. Every
+ * date is worked out from "today" and from the log itself, never written in:
+ * CI runs this suite on a Wednesday and again on a Monday.
  */
 
 import fs from 'node:fs';
@@ -35,27 +36,46 @@ export async function delayExport(page, { check }) {
     (await page.locator('#rc-frame .la-export-delay').count()) === 1 && (await page.locator('#rc-frame .la-export-xlsx').count()) === 1);
 
   const today = await page.evaluate(() => window.__CX_MODULES.req('ui/rc_util.js').todayISO());
-  const from = await page.evaluate((t) => window.__CX_MODULES.req('ui/rc_la_delay.js').delaySpan(t).from, today);
+  const addDays = (iso, n) => new Date(Date.parse(`${iso}T00:00:00Z`) + n * 864e5).toISOString().slice(0, 10);
+  const byDefault = await page.evaluate((t) => window.__CX_MODULES.req('ui/rc_la_delay.js').delaySpan(t), today);
+  check('by default, the delay log is the last ten days, up to and including today',
+    byDefault.to === today && byDefault.from === addDays(today, -9) && byDefault.days === 10, `${byDefault.from} to ${byDefault.to}`);
+
+  /* The days exported here end on the newest cancellation with a reason,
+     whatever day "today" is: the fixtures' cancellations sit around the week
+     on screen, and on a Monday the ten days before it hold none — a check
+     that reads the window off the calendar is a check of nothing then. */
+  const end = await page.evaluate(async () => {
+    const log = await window.__CX_MODULES.req('ui/rc_util.js').cancellationLog('2000-01-01');
+    return log.filter((e) => !e.dismissed && e.note?.reason).map((e) => e.start).sort().pop() || null;
+  });
+  const from = end ? addDays(end, -9) : today;
   const expected = await page.evaluate(async ([f, t]) => {
     const events = await window.__CX_MODULES.req('ui/rc_la_delay.js').delayEvents(f, t);
     return events.map((e) => ({ label: e.label, start: e.start, reason: e.note?.reason || '', party: e.note?.party || '' }));
-  }, [from, today]);
-  check('the delay log is the last ten days, up to and including today', from === '2026-09-14' && today === '2026-09-23', `${from} to ${today}`);
-  check('and there are cancellations in it to carry, some with a reason',
-    expected.length > 0 && expected.some((e) => e.reason), JSON.stringify(expected).slice(0, 300));
+  }, [from, end || today]);
+  check('there are cancellations to carry, some with a reason',
+    Boolean(end) && expected.length > 0 && expected.some((e) => e.reason), `${from} to ${end}: ${JSON.stringify(expected).slice(0, 300)}`);
 
   await page.locator('#rc-frame .la-export-delay').click();
   const dialog = page.locator('.cx-modal', { hasText: '4WLA and delay log' });
   await dialog.waitFor({ timeout: 8000 });
-  check('it asks for the 4WLA\'s weeks as Export to Excel does, and the delay log\'s days',
+  check('it asks for the 4WLA\'s weeks as Export to Excel does, and the delay log\'s days — ten, to today',
     (await dialog.locator('.lae-export-resources').count()) === 1
       && (await dialog.locator('.la-delay-days').inputValue()) === '10' && (await dialog.locator('.la-delay-end').inputValue()) === today);
+  const setEnd = async (iso) => {
+    await dialog.locator('.la-delay-end').fill(iso);
+    await dialog.locator('.la-delay-end').dispatchEvent('change');
+  };
+  await setEnd(end || today);
+  await page.waitForFunction((n) => new RegExp(`${n} cancellation`).test(document.querySelector('.la-delay-summary')?.textContent || ''),
+    expected.length, { timeout: 5000 }).catch(() => {});
   const summary = await dialog.locator('.la-delay-summary').innerText();
   check('it says how many cancellations the days hold', new RegExp(`${expected.length} cancellation`).test(summary), summary);
   const listed = await dialog.locator('.la-delay-files li').allInnerTexts();
   check('and names the three files the .zip will hold',
     listed.length === 3 && /^4WLA \d{4}-\d{2}-\d{2} to \d{4}-\d{2}-\d{2}\.xlsx/.test(listed[0])
-      && listed[1].startsWith(`Delay log ${from} to ${today}.pdf`) && listed[2].startsWith(`Delay log ${from} to ${today}.xlsx`), listed.join(' | '));
+      && listed[1].startsWith(`Delay log ${from} to ${end}.pdf`) && listed[2].startsWith(`Delay log ${from} to ${end}.xlsx`), listed.join(' | '));
 
   await page.evaluate(() => { window.__saved = {}; window.__lastBlob = null; });
   await dialog.locator('.cx-modal-foot button', { hasText: 'Download' }).click();
@@ -67,7 +87,7 @@ export async function delayExport(page, { check }) {
   const names = [...inside.keys()];
   check('holding the 4WLA workbook, and the delay log as a PDF and as a workbook',
     names.length === 3 && /^4WLA .*\.xlsx$/.test(names[0])
-      && names[1] === `Delay log ${from} to ${today}.pdf` && names[2] === `Delay log ${from} to ${today}.xlsx`, names.join(' | '));
+      && names[1] === `Delay log ${from} to ${end}.pdf` && names[2] === `Delay log ${from} to ${end}.xlsx`, names.join(' | '));
 
   const fourWeeks = inside.get(names[0]);
   if (fourWeeks) {
@@ -83,7 +103,8 @@ export async function delayExport(page, { check }) {
     const files = readZip(bufferOf(book));
     const sheets = readSheets(files).map((s) => s.name);
     const list = words(new TextDecoder().decode(files.get('xl/worksheets/sheet1.xml')));
-    const rows = parseSheet(bufferOf(book), 'Delay log').rows.filter((r) => r.row > 5 && r.cells.some((c) => c.value));
+    const rows = parseSheet(bufferOf(book), 'Delay log').rows
+      .filter((r) => r.row > 5 && r.cells.some((c) => c.value) && !/^Nothing was cancelled/.test(r.cells[0]?.value || ''));
     check('the delay log workbook is the list, then the calendar', sheets.join() === 'Delay log,Calendar', sheets.join(', '));
     check('a row for every cancellation in those days, with its reason',
       rows.length === expected.length && expected.every((e) => list.includes(e.label.slice(0, 30)))
@@ -105,14 +126,16 @@ export async function delayExport(page, { check }) {
   check('and the download says so', await said.waitFor({ timeout: 5000 }).then(() => true).catch(() => false));
 
   // Fewer days: the summary and the names follow, before anything is built.
+  const three = `Delay log ${addDays(end || today, -2)} to ${end || today}`;
   await page.locator('#rc-frame .la-export-delay').click();
   await dialog.waitFor({ timeout: 8000 });
+  await setEnd(end || today);
   await dialog.locator('.la-delay-days').fill('3');
   await dialog.locator('.la-delay-days').dispatchEvent('change');
-  await page.waitForFunction(() => /2026-09-21 to 2026-09-23\.pdf/.test(document.querySelector('.la-delay-files')?.textContent || ''), null, { timeout: 5000 }).catch(() => {});
+  await page.waitForFunction((n) => (document.querySelector('.la-delay-files')?.textContent || '').includes(`${n}.pdf`), three, { timeout: 5000 }).catch(() => {});
   check('three days instead of ten: the files are named for them',
-    /Delay log 2026-09-21 to 2026-09-23\.pdf/.test(await dialog.locator('.la-delay-files').innerText()));
-  const filed = 'exports/4WLA and delay log 2026-09-23.zip';
+    (await dialog.locator('.la-delay-files').innerText()).includes(`${three}.pdf`), three);
+  const filed = `exports/4WLA and delay log ${today}.zip`;
   await dialog.locator('.cx-modal-foot button', { hasText: 'Save to the shared folder' }).click();
   await page.waitForFunction((k) => Boolean(window.__folder.files[k]), filed, { timeout: 15000 }).catch(() => {});
   const saved = await page.evaluate((k) => {
@@ -120,7 +143,7 @@ export async function delayExport(page, { check }) {
     return f ? Array.from(f.data) : null;
   }, filed);
   check('"Save to the shared folder" files the .zip into exports/',
-    Boolean(saved) && [...readZip(bufferOf(new Uint8Array(saved))).keys()].includes('Delay log 2026-09-21 to 2026-09-23.xlsx'),
+    Boolean(saved) && [...readZip(bufferOf(new Uint8Array(saved))).keys()].includes(`${three}.xlsx`),
     (await page.evaluate(() => Object.keys(window.__folder.files).filter((k) => k.startsWith('exports/')))).join(' | '));
   await page.keyboard.press('Escape');
 
