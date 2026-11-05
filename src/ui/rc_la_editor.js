@@ -50,6 +50,7 @@ import { la } from './rc_la_state.js';
 import { loadP6, openP6Picker, openP6Import, p6Words } from './rc_la_p6.js';
 import { E, META, fmt, legendInForce, ensureWindow } from './rc_la_editor_state.js';
 import { openExcelExport } from './rc_la_export.js';
+import { delayExportButton } from './rc_la_delay.js';
 
 /* ══════════════════════════════════════════════════════════════════════════
    State
@@ -688,6 +689,7 @@ function toolbar(days) {
       class: 'cx-btn mini', type: 'button', html: icon('download', { size: 12 }) + '<span>Export to Excel</span>',
       onClick: () => openExcelExport(),
     }),
+    delayExportButton(),
     iconButton('settings', 'More', (e) => moreMenu(e)),
   ].filter(Boolean));
 

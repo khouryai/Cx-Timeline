@@ -588,6 +588,69 @@ console.log('\nThe Excel export');
   check('and the weekend grey on the days nothing was cancelled',
     !cwCells.some((c) => c.ref === 'E7' && c.hex && c.hex !== '7F7F7F'));
 
+  /* The cancellation log as a list in Excel — the tab's export, in place of a
+     CSV — and the delay log: that list and the calendar, one workbook. */
+  const cl = await import(path.join(ROOT, 'src/io/cancel_log.js'));
+  const ev = (o) => ({
+    key: o.label || 'IXL night mode testing', laRowId: null, kind: 'activity', codes: '', label: 'IXL night mode testing',
+    location: 'W34', start: '2026-10-01', end: '2026-10-02', days: 2, reads: 3, firstSeen: '2026-09-28T09:00:00Z',
+    resources: new Map([['X', 2]]), note: null, history: [], ...o,
+  });
+  const logEvents = [
+    ev({ note: { party: 'BART', reason: 'Possession withdrawn', author: 'u1', created_at: '2026-10-01T08:00:00Z' } }),
+    ev({ label: 'ATS site test', location: 'W40', start: '2026-10-03', end: '2026-10-03', days: 1, note: { party: 'Hitachi', reason: 'Crew reallocated' } }),
+    ev({ label: 'Cable pull', kind: 'support', codes: 'WIT', start: '2026-10-04', end: '2026-10-04', days: 1, resources: new Map([['WIT', 1]]) }),
+  ];
+  const logLines = cl.logLines(logEvents, { who: (id) => (id === 'u1' ? 'Dan' : '') });
+  const unzip = (b) => la.readZip(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength));
+  const text = (files, name) => new TextDecoder().decode(files.get(name) || new Uint8Array());
+  const lw = xl.cancellationListWorkbook({ lines: logLines, stats: cl.logStats(logEvents), title: 'Cancellation log', subtitle: 'Since 1 Sep 26', red: 'FF0000' });
+  const lwBack = la.parseSheet(lw.buffer.slice(lw.byteOffset, lw.byteOffset + lw.byteLength), 'Cancellations');
+  const lwCells = new Map(lwBack.rows.flatMap((r) => r.cells).map((c) => [c.ref, c]));
+  check('the list in Excel opens on a title, the span and the counts, over one table',
+    lwCells.get('A1')?.value === 'Cancellation log' && lwCells.get('A2')?.value === 'Since 1 Sep 26'
+      && /Events 3 .*No reason yet 1/.test(lwCells.get('A3')?.value || ''),
+    [...lwCells.values()].slice(0, 4).map((c) => `${c.ref}=${c.value}`).join(' | '));
+  check('its heading row names the tab\'s columns, shaded, with the dates split into From and To',
+    ['Activity', 'Location', 'What', 'BART resources', 'From', 'To', 'Days', 'Responsible', 'Reason', 'Logged by', 'Logged on', 'Readings', 'First seen']
+      .every((h, i) => lwCells.get(`${String.fromCharCode(65 + i)}5`)?.value === h && lwCells.get(`${String.fromCharCode(65 + i)}5`)?.hex === 'F2F2F2'));
+  check('a row per cancellation, its dates as dates Excel sorts, not text',
+    lwCells.get('A6')?.value === 'IXL night mode testing' && lwCells.get('E6')?.value === String(xw.dateSerial('2026-10-01'))
+      && lwCells.get('F6')?.value === String(xw.dateSerial('2026-10-02')) && lwCells.get('G6')?.value === '2' && lwCells.get('J6')?.value === 'Dan');
+  check('whose it was is the cell\'s colour and its words — BART the legend\'s red, Hitachi blue, no reason yet lavender',
+    lwCells.get('H6')?.value === 'BART' && lwCells.get('H6')?.hex === 'FF0000' && lwCells.get('H7')?.hex === '0070C0'
+      && lwCells.get('H8')?.value === 'No reason yet' && lwCells.get('H8')?.hex === 'E4D7F5');
+  const lwFiles = unzip(lw);
+  const lwSheet = text(lwFiles, 'xl/worksheets/sheet1.xml');
+  const strikeStyle = (() => {
+    const styles = text(lwFiles, 'xl/styles.xml');
+    const fonts = [...styles.matchAll(/<font>[\s\S]*?<\/font>/g)].map((m) => m[0]);
+    const xfs = [...(/<cellXfs[^>]*>([\s\S]*?)<\/cellXfs>/.exec(styles)?.[1] || '').matchAll(/<xf [^>]*?fontId="(\d+)"/g)].map((m) => Number(m[1]));
+    const s = Number(/<c r="D8" s="(\d+)"/.exec(lwSheet)?.[1]);
+    return /<strike\/>/.test(fonts[xfs[s]] || '');
+  })();
+  check('a BART resource struck out of work that went ahead is struck through, as on screen', strikeStyle);
+  check('the heading row stays in view and filters, and prints on every page',
+    /<pane ySplit="5" topLeftCell="A6"[^>]*state="frozen"/.test(lwSheet) && /<autoFilter ref="A5:M8"\/>/.test(lwSheet)
+      && /_xlnm\._FilterDatabase/.test(text(lwFiles, 'xl/workbook.xml')) && /'Cancellations'!\$5:\$5/.test(text(lwFiles, 'xl/workbook.xml')));
+  check('and no "removed" column unless the list holds one removed from the log', !/Removed from the log/.test(lwSheet));
+
+  const dw = xl.delayLogWorkbook({
+    lines: logLines, stats: cl.logStats(logEvents), days: cl.spanDays('2026-09-25', '2026-10-04'),
+    rows: cl.calendarCells(logEvents), title: 'Delay log', subtitle: '25 Sep 26 to 4 Oct 26', red: 'FF0000',
+  });
+  const dwFiles = unzip(dw);
+  const dwBook = text(dwFiles, 'xl/workbook.xml');
+  check('the delay log in Excel is the list, then the calendar', /<sheet name="Delay log"[^>]*\/><sheet name="Calendar"/.test(dwBook));
+  check('opening on the list — one tab selected, never two grouped',
+    /tabSelected="1"/.test(text(dwFiles, 'xl/worksheets/sheet1.xml')) && !/tabSelected/.test(text(dwFiles, 'xl/worksheets/sheet2.xml')));
+  const dwCal = la.parseSheet(dw.buffer.slice(dw.byteOffset, dw.byteOffset + dw.byteLength), 'Calendar');
+  const dwCalCells = dwCal.rows.flatMap((r) => r.cells);
+  check('and the calendar sheet is the tab\'s calendar: a merged cell per run, with whose and why',
+    dwCal.merges.includes('I9:J9') && dwCalCells.some((c) => c.ref === 'I9' && /Possession withdrawn/.test(c.value) && c.hex === 'FF0000'),
+    `${dwCal.merges.join(' ')} · ${dwCalCells.filter((c) => c.value).map((c) => `${c.ref}=${c.value.slice(0, 20)}`).join(' | ').slice(0, 300)}`);
+  check('one style table between the two sheets', [...dwFiles.keys()].filter((k) => /styles\.xml$/.test(k)).length === 1);
+
   check('the ZIP checksum is the standard one', xw.crc32(new TextEncoder().encode('123456789')) === 0xcbf43926);
   check('control characters cannot corrupt the file', xw.xmlEscape('a\u0001b<c>') === 'ab&lt;c&gt;');
 }

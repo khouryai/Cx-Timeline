@@ -1,7 +1,7 @@
 /*!
  * CX Timeline — the resource calendar, loaded on first use.
  * GENERATED FILE — built by tools/build.js alongside app.bundle.js.
- * Modules: 31   Built: 2026-11-01T16:26:46.141Z
+ * Modules: 33   Built: 2026-11-05T00:08:40.856Z
  */
 (function () {
   'use strict';
@@ -7073,8 +7073,9 @@ __mods["io/xlsx_write.js"] = function (__x, __req) {
   /**
    * The style table, built from what the sheet asks for.
    *
-   * A style is described as `{ bold, italic, size, color, fill, border, h, v,
-   * wrap, shrink, numFmt }` and `id()` returns its index in `cellXfs`, adding it the first time
+   * A style is described as `{ bold, italic, strike, size, color, fill, border,
+   * borderColor, h, v, wrap, shrink, numFmt }` and `id()` returns its index in
+   * `cellXfs`, adding it the first time
    * — so the workbook carries exactly the styles its cells use and no more.
    */
   function styleBook({ font = 'Arial', size = 10 } = {}) {
@@ -7085,7 +7086,7 @@ __mods["io/xlsx_write.js"] = function (__x, __req) {
     const index = new Map();
 
     const fontId = (s) => {
-      const xml = `<font>${s.bold ? '<b/>' : ''}${s.italic ? '<i/>' : ''}<sz val="${s.size || size}"/>`
+      const xml = `<font>${s.bold ? '<b/>' : ''}${s.italic ? '<i/>' : ''}${s.strike ? '<strike/>' : ''}<sz val="${s.size || size}"/>`
         + `<color rgb="FF${s.color || '000000'}"/><name val="${font}"/><family val="2"/></font>`;
       let at = fonts.indexOf(xml);
       if (at < 0) { fonts.push(xml); at = fonts.length - 1; }
@@ -7098,9 +7099,10 @@ __mods["io/xlsx_write.js"] = function (__x, __req) {
       if (at < 0) { fills.push(xml); at = fills.length - 1; }
       return at;
     };
-    const borderId = (b = '') => {
+    const borderId = (b = '', color = null) => {
+      const ink = color ? `<color rgb="FF${color}"/>` : '<color indexed="64"/>';
       const side = (name) => (b.includes(name[0])
-        ? `<${name} style="thin"><color indexed="64"/></${name}>` : `<${name}/>`);
+        ? `<${name} style="thin">${ink}</${name}>` : `<${name}/>`);
       const xml = `<border>${side('left')}${side('right')}${side('top')}${side('bottom')}<diagonal/></border>`;
       let at = borders.indexOf(xml);
       if (at < 0) { borders.push(xml); at = borders.length - 1; }
@@ -7121,7 +7123,7 @@ __mods["io/xlsx_write.js"] = function (__x, __req) {
         : '';
       const f = fontId(s);
       const fi = fillId(s.fill);
-      const b = borderId(s.border);
+      const b = borderId(s.border, s.borderColor);
       // A built-in number format by its id (14 a date, 22 a date and time) —
       // built-ins need no <numFmts> entry, and every program reads them.
       const nf = s.numFmt || 0;
@@ -7168,11 +7170,23 @@ __mods["io/xlsx_write.js"] = function (__x, __req) {
     return clean || 'Sheet1';
   }
 
-  function workbookParts({ sheetName, sheetXml, stylesXml, printTitles = null, title = '' }) {
-    const name = xmlEscape(sheetNameFor(sheetName));
-    const defined = printTitles
-      ? `<definedNames><definedName name="_xlnm.Print_Titles" localSheetId="0">'${name.replace(/'/g, "''")}'!${printTitles}</definedName></definedNames>`
-      : '';
+  function workbookParts({ sheetName, sheetXml, stylesXml, printTitles = null, title = '', sheets = null }) {
+    /* One sheet, or several sharing one style table — `sheets` is `[{ name, xml,
+       printTitles?, filter? }]`, `filter` the range a sheet's auto-filter covers.
+       Only the first may be the selected tab: two selected tabs is Excel's
+       "grouped sheets", where typing into one writes into both. */
+    const used = new Set();
+    const named = (sheets || [{ name: sheetName, xml: sheetXml, printTitles }]).map((sheet) => {
+      let name = sheetNameFor(sheet.name);
+      for (let n = 2; used.has(name.toLowerCase()); n++) name = sheetNameFor(`${sheetNameFor(sheet.name).slice(0, 27)} (${n})`);
+      used.add(name.toLowerCase());
+      return { ...sheet, name };
+    });
+    const quoted = (name) => `'${xmlEscape(name).replace(/'/g, "''")}'`;
+    const defined = named.flatMap((sheet, i) => [
+      sheet.filter ? `<definedName name="_xlnm._FilterDatabase" localSheetId="${i}" hidden="1">${quoted(sheet.name)}!${sheet.filter}</definedName>` : '',
+      sheet.printTitles ? `<definedName name="_xlnm.Print_Titles" localSheetId="${i}">${quoted(sheet.name)}!${sheet.printTitles}</definedName>` : '',
+    ]).join('');
     return [
       {
         name: '[Content_Types].xml',
@@ -7181,7 +7195,7 @@ __mods["io/xlsx_write.js"] = function (__x, __req) {
           + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
           + '<Default Extension="xml" ContentType="application/xml"/>'
           + '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
-          + '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+          + named.map((_, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('')
           + '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
           + '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>'
           + '</Types>',
@@ -7209,19 +7223,20 @@ __mods["io/xlsx_write.js"] = function (__x, __req) {
           + '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
           + 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
           + '<bookViews><workbookView xWindow="0" yWindow="0" windowWidth="28800" windowHeight="15000"/></bookViews>'
-          + `<sheets><sheet name="${name}" sheetId="1" r:id="rId1"/></sheets>${defined}`
+          + `<sheets>${named.map((sheet, i) => `<sheet name="${xmlEscape(sheet.name)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join('')}</sheets>`
+          + (defined ? `<definedNames>${defined}</definedNames>` : '')
           + '</workbook>',
       },
       {
         name: 'xl/_rels/workbook.xml.rels',
         data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
           + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-          + '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
-          + '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+          + named.map((_, i) => `<Relationship Id="rId${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`).join('')
+          + `<Relationship Id="rId${named.length + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>`
           + '</Relationships>',
       },
       { name: 'xl/styles.xml', data: stylesXml },
-      { name: 'xl/worksheets/sheet1.xml', data: sheetXml },
+      ...named.map((sheet, i) => ({ name: `xl/worksheets/sheet${i + 1}.xml`, data: sheet.xml })),
     ];
   }
 
@@ -7437,6 +7452,711 @@ __mods["io/xlsx_write.js"] = function (__x, __req) {
   Object.defineProperty(__x, "tableWorkbook", { get: () => tableWorkbook, enumerable: true });
 };
 
+// io/cancel_log.js
+__mods["io/cancel_log.js"] = function (__x, __req) {
+  /**
+   * The cancellation log — the delay log — on paper, and shaped for Excel.
+   *
+   * Three things leave the calendar from it. The list, exactly as the
+   * Cancellations tab draws it: the same columns, the same squares per day, the
+   * same badges, the counts above it (Export PDF and Export to Excel on that
+   * tab). The calendar "As a calendar" draws: one row per activity, each
+   * cancelled run one cell across its days. And both together for the days just
+   * gone — the delay log in the zip beside the 4WLA (`ui/rc_la_delay.js`).
+   *
+   * One module, so the list on screen, on paper and in Excel read the events the
+   * same way — `runText()`, `calendarRows()` and `logLines()` are what the
+   * screen itself uses — and the colour is whose it was in every one of them:
+   * BART red, Hitachi blue, another party amber, purple while nobody has said.
+   *
+   * No DOM and no network: it takes events (`cancellationLog()`) and returns
+   * scenes and bytes, which is what lets `tools/test_lookahead.js` lay the pages
+   * out in Node and check nothing is drawn off the sheet.
+   *
+   * Imports: io/pdf, io/lookahead, core/lookahead, core/la_edit, core/dates.
+   */
+
+  const { fitPagesToPdf, contentBox, textWidth } = __req("io/pdf.js");
+  const { isDark } = __req("io/lookahead.js");
+  const { describeCodeCounts } = __req("core/lookahead.js");
+  const { monthLabel, weekdayLetter, isWeekend, addDaysISO } = __req("core/la_edit.js");
+  const { fmtDate, localDayMs, toISO } = __req("core/dates.js");
+
+  /** Whose a cancellation can be: the contract's three answers, as the schema checks them. */
+  const CANCEL_PARTIES = ['BART', 'Hitachi', 'Other'];
+  /**
+   * The calendar's colours, as `--la-cancel-*` draws them on screen and the
+   * Excel writes them: a fill per answer for a day cancelled outright (BART's is
+   * the legend's own red, passed in), and writing a white sheet can carry for a
+   * resource struck out of work that went ahead.
+   */
+  const CANCEL_FILL = { Hitachi: '0070C0', Other: 'FFC000', open: 'E4D7F5' };
+  const CANCEL_INK = { BART: 'FF0000', Hitachi: '0070C0', Other: 'C55A11', open: '7030A0' };
+  const KIND_LABEL = { activity: 'Activity cancelled', support: 'BART support cancelled' };
+  /** The badge tone each answer takes in the list, as `badge()` draws it. */
+  const PARTY_TONE = { BART: 'bad', Hitachi: 'info', Other: 'warn' };
+  const OPEN_TONE = 'pending';
+
+  /** Whose it was — 'BART', 'Hitachi', 'Other' — or null while nobody has said. */
+  function partyOf(e) {
+    if (!e?.note) return null;
+    return CANCEL_PARTIES.includes(e.note.party) ? e.note.party : 'Other';
+  }
+
+  function isoMs(iso) {
+    return Date.parse(`${String(iso).slice(0, 10)}T00:00:00Z`);
+  }
+
+  /** "23 Sep 26", in the order the application writes dates — the same words as the screen. */
+  function dayText(iso, preset = 'short') {
+    return fmtDate(isoMs(iso), preset);
+  }
+
+  /** One day, or the first and last of a run. */
+  function spanText(start, end) {
+    return start === end ? dayText(start) : `${dayText(start)} – ${dayText(end)}`;
+  }
+
+  /**
+   * How many reads showed it, and the day it was first seen — that day on this
+   * computer's calendar, not Greenwich's: an instant's ISO date is tomorrow in
+   * California from five in the afternoon.
+   */
+  function seenText(e) {
+    const reads = e.reads || 0;
+    const first = e.firstSeen ? ` · first ${dayText(toISO(localDayMs(e.firstSeen)))}` : '';
+    return `${reads} read${reads === 1 ? '' : 's'}${first}`;
+  }
+
+  /** Every day from one date to another, both ends included — never more than 400. */
+  function spanDays(from, to) {
+    const days = [];
+    for (let d = from; d <= to && days.length < 400; d = addDaysISO(d, 1)) days.push(d);
+    return days;
+  }
+
+  /** What one cancelled run says on the calendar and in its Excel cell: what went, then whose and why. */
+  function runText(e) {
+    const what = e.kind === 'support'
+      ? `${describeCodeCounts(e.resources)} cancelled`
+      : describeCodeCounts(e.resources);
+    const why = e.note ? `${e.note.party}${e.note.reason ? `: ${e.note.reason}` : ''}` : 'No reason yet';
+    return [what, why].filter(Boolean).join('\n');
+  }
+
+  /**
+   * The calendar's rows: one per activity (its editor row where it has one, else
+   * its words), each with the runs cancelled on it, in the order of the label.
+   */
+  function calendarRows(events) {
+    const byActivity = new Map();
+    for (const e of events) {
+      const activity = e.laRowId || e.key;
+      if (!byActivity.has(activity)) byActivity.set(activity, { label: e.label || '', location: e.location || '', events: [] });
+      byActivity.get(activity).events.push(e);
+    }
+    return [...byActivity.values()]
+      .sort((a, b) => a.label.localeCompare(b.label) || a.location.localeCompare(b.location));
+  }
+
+  /** The calendar's rows as the Excel writer takes them: each run's dates, kind, party and words. */
+  function calendarCells(events) {
+    return calendarRows(events).map((r) => ({
+      ...r,
+      events: r.events.map((e) => ({ start: e.start, end: e.end, kind: e.kind, party: partyOf(e), text: runText(e) })),
+    }));
+  }
+
+  /**
+   * Each event as a plain line — what the list says about it, in words and
+   * dates, for the PDF and the Excel alike. `who` names an author from the id a
+   * note was stamped with (`authorNames()`).
+   *
+   * @param {any[]} events
+   * @param {{ who?: (id: any) => string }} [o]
+   */
+  function logLines(events, { who = () => '' } = {}) {
+    return events.map((e) => ({
+      label: e.label || '',
+      location: e.location || '',
+      kind: e.kind,
+      what: KIND_LABEL[e.kind] || e.kind,
+      resources: describeCodeCounts(e.resources),
+      start: e.start,
+      end: e.end,
+      days: e.days,
+      reads: e.reads || 0,
+      seen: seenText(e),
+      firstSeen: e.firstSeen || '',
+      party: partyOf(e),
+      responsible: e.note ? e.note.party : 'No reason yet',
+      reason: e.note?.reason || '',
+      corrections: Math.max(0, (e.history?.length || 0) - 1),
+      loggedBy: who(e.note?.author) || '',
+      loggedAt: e.note?.created_at || '',
+      removed: Boolean(e.dismissed),
+    }));
+  }
+
+  /** The counts the tab shows above the list, over the events it counts them over. */
+  function logStats(events) {
+    const tally = { BART: 0, Hitachi: 0, Other: 0 };
+    let open = 0;
+    let days = 0;
+    for (const e of events) {
+      days += e.days;
+      if (e.note) tally[e.note.party] = (tally[e.note.party] || 0) + 1;
+      else open++;
+    }
+    const support = events.filter((e) => e.kind === 'support').length;
+    return { events: events.length, activities: events.length - support, support, days, ...tally, open };
+  }
+
+  /** The same counts as chips: label, value and the tone the tab gives each. */
+  function statChips(s) {
+    return [
+      ['Events', s.events, 'info'],
+      ['Cancelled activities', s.activities, 'muted'],
+      ['BART support', s.support, s.support ? 'warn' : 'muted'],
+      ['Days', s.days, 'muted'],
+      ...CANCEL_PARTIES.map((p) => [p, s[p], s[p] ? PARTY_TONE[p] : 'muted']),
+      ['No reason yet', s.open, s.open ? OPEN_TONE : 'muted'],
+    ];
+  }
+
+  /** The counts in one line of words, for a sheet's heading. */
+  function statsText(s) {
+    return statChips(s).map(([label, value]) => `${label} ${value}`).join('  ·  ');
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     Drawing
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /** The light theme's status colours, for paper: ink, wash and border, as `badge()` and `chipStat()` draw them. */
+  const TONE = {
+    bad: { ink: '#c01017', bg: '#fdeaeb', border: '#efc1c3' },
+    info: { ink: '#1d4eaf', bg: '#e8efff', border: '#c4d1ea' },
+    warn: { ink: '#a8550a', bg: '#fbf0e1', border: '#e5ccb6' },
+    pending: { ink: '#6b21a8', bg: '#f1eaf9', border: '#d9c5e8' },
+    neutral: { ink: '#6b7280', bg: '#f3f4f6', border: '#d6d8db' },
+    muted: { ink: '#6e7179', bg: '#f3f4f6', border: '#d6d8db' },
+  };
+  const INK = {
+    text: '#131316',
+    muted: '#6e7179',
+    rule: '#e3e4e7',
+    ruleStrong: '#b9bcc2',
+    weekend: '#f5f5f5',
+    band: '#eeeeee',
+    today: '#e60012',
+    todayWash: '#e8efff',
+    onDark: '#ffffff',
+  };
+  const PALETTE = { bg: '#ffffff', text: INK.text, textSubtle: INK.muted, brand: INK.today };
+
+  /** Greedy word wrap, each paragraph on its own; a word wider than the column breaks on characters. */
+  function wrap(text, width, size, font = 'F1') {
+    const out = [];
+    for (const para of String(text ?? '').split(/\r?\n/)) {
+      const words = para.split(/\s+/).filter(Boolean);
+      let line = '';
+      for (const word of words) {
+        const next = line ? `${line} ${word}` : word;
+        if (textWidth(next, size, font) <= width || !line) line = next;
+        else {
+          out.push(line);
+          line = word;
+        }
+        while (textWidth(line, size, font) > width && line.length > 1) {
+          let cut = line.length;
+          while (cut > 1 && textWidth(line.slice(0, cut), size, font) > width) cut--;
+          out.push(line.slice(0, cut));
+          line = line.slice(cut);
+        }
+      }
+      if (line) out.push(line);
+    }
+    return out;
+  }
+
+  /* ── The list ──────────────────────────────────────────────────────────── */
+
+  const LF = 7.4;          // body type
+  const LS = 6.5;          // the muted second line
+  const LL = 9.4;          // line height
+  const PAD_X = 4.5;
+  const PAD_Y = 5;
+  const HEAD_F = 5.8;
+  const HEAD_H = 17;
+  const BADGE_F = 6.3;
+  const BADGE_H = 11;
+  const SQ_W = 4.6;
+  const SQ_H = 7.4;
+  const SQ_GAP = 1.4;
+  const CHIP_H = 17;
+
+  const LIST_HEADS = ['', 'Activity', 'What', 'BART resources', 'Cancelled', 'Length', 'Seen', 'Responsible', 'Reason'];
+
+  function badgeWidth(text) {
+    return 6 + 3.2 + 3.6 + textWidth(text, BADGE_F, 'F2') + 6;
+  }
+
+  /** A badge as the application draws one: a wash, a hairline, a dot, the words in the tone's ink. */
+  function badge(items, x, y, text, toneName) {
+    const tone = TONE[toneName] || TONE.neutral;
+    const w = badgeWidth(text);
+    items.push({ type: 'rect', x, y, w, h: BADGE_H, radius: 2.6, fill: tone.bg, stroke: tone.border, strokeWidth: 0.5 });
+    items.push({ type: 'circle', cx: x + 6 + 1.6, cy: y + BADGE_H / 2, r: 1.6, fill: tone.ink });
+    items.push({ type: 'text', x: x + 6 + 3.2 + 3.6, y: y + BADGE_H / 2 + BADGE_F * 0.36, text, size: BADGE_F, fill: tone.ink, weight: 700 });
+    return w;
+  }
+
+  /** The counts as the tab's chips: a wash per tone, the label in mono capitals, the number bold. */
+  function chips(items, list, width) {
+    let x = 0;
+    let y = 0;
+    for (const [label, value, toneName] of list) {
+      const tone = TONE[toneName] || TONE.muted;
+      const caps = label.toUpperCase();
+      const w = 7 + textWidth(caps, 5.4, 'F4') + 6 + textWidth(String(value), 9, 'F2') + 7;
+      if (x + w > width && x > 0) { x = 0; y += CHIP_H + 5; }
+      items.push({ type: 'rect', x, y, w, h: CHIP_H, radius: 3.5, fill: toneName === 'muted' ? TONE.neutral.bg : tone.bg, stroke: toneName === 'muted' ? TONE.neutral.border : tone.border, strokeWidth: 0.5 });
+      items.push({ type: 'text', x: x + 7, y: y + CHIP_H / 2 + 2, text: caps, size: 5.4, family: 'mono', weight: 700, fill: tone.ink });
+      items.push({ type: 'text', x: x + 7 + textWidth(caps, 5.4, 'F4') + 6, y: y + CHIP_H / 2 + 3.2, text: String(value), size: 9, weight: 700, fill: tone.ink });
+      x += w + 6;
+    }
+    return y + CHIP_H;
+  }
+
+  /** How wide each column of the list is, from what is in it; Activity and Reason share what is left. */
+  function listWidths(lines, width) {
+    const longest = (fn, font = 'F1', size = LF) => Math.max(0, ...lines.map((l) => textWidth(fn(l), size, font)));
+    const fit = (w, head, lo, hi) => Math.min(hi, Math.max(lo, w, textWidth(head.toUpperCase(), HEAD_F, 'F4'))) + PAD_X * 2;
+    const squares = Math.max(1, ...lines.map((l) => Math.min(l.days || 1, 14)));
+    const fixed = {
+      cells: squares * (SQ_W + SQ_GAP) - SQ_GAP + PAD_X * 2,
+      what: Math.max(0, ...lines.map((l) => Math.max(badgeWidth(l.what), l.removed ? badgeWidth('Removed from the log') : 0))) + PAD_X * 2,
+      resources: fit(longest((l) => l.resources || '—', 'F2'), 'BART resources', 30, 110),
+      cancelled: fit(longest((l) => spanText(l.start, l.end)), 'Cancelled', 40, 105),
+      length: fit(longest((l) => `${l.days} day${l.days === 1 ? '' : 's'}`), 'Length', 22, 40),
+      seen: fit(longest((l) => l.seen, 'F1', LS), 'Seen', 40, 92),
+      responsible: Math.max(0, ...lines.map((l) => badgeWidth(l.responsible))) + PAD_X * 2,
+    };
+    const used = Object.values(fixed).reduce((a, b) => a + b, 0);
+    const rest = Math.max(220, width - used);
+    return [fixed.cells, rest * 0.55, fixed.what, fixed.resources, fixed.cancelled, fixed.length, fixed.seen, fixed.responsible, rest * 0.45];
+  }
+
+  /** One line of the list laid out: what goes in each column, and how tall the row is. */
+  function layLine(l, widths) {
+    const inner = (i) => widths[i] - PAD_X * 2;
+    const cells = {
+      activity: wrap(l.label || '—', inner(1), LF),
+      location: l.location ? wrap(l.location, inner(1), LS) : [],
+      resources: l.resources ? wrap(l.resources, inner(3), LF, 'F2') : ['—'],
+      cancelled: wrap(spanText(l.start, l.end), inner(4), LF),
+      length: wrap(`${l.days} day${l.days === 1 ? '' : 's'}`, inner(5), LF),
+      seen: wrap(l.seen, inner(6), LS),
+      reason: l.reason ? wrap(l.reason, inner(8), LF) : [],
+      corrected: l.corrections ? wrap(`Corrected ${l.corrections} time(s)`, inner(8), LS) : [],
+    };
+    const textH = Math.max(
+      (cells.activity.length * LL) + (cells.location.length * (LS + 2.6)),
+      cells.resources.length * LL,
+      cells.cancelled.length * LL,
+      cells.length.length * LL,
+      cells.seen.length * (LS + 2.6),
+      (cells.reason.length * LL) + (cells.corrected.length * (LS + 2.6)),
+      l.removed ? BADGE_H * 2 + 3 : BADGE_H,
+      SQ_H,
+    );
+    return { l, cells, h: Math.max(20, textH + PAD_Y * 2) };
+  }
+
+  /** The header row of the list, as the tab's table heads its columns: mono capitals, muted. */
+  function listHead(items, widths, y, width) {
+    let x = 0;
+    LIST_HEADS.forEach((head, i) => {
+      if (head) items.push({ type: 'text', x: x + PAD_X, y: y + HEAD_H - 6, text: head.toUpperCase(), size: HEAD_F, family: 'mono', weight: 700, fill: INK.muted });
+      x += widths[i];
+    });
+    items.push({ type: 'line', x1: 0, y1: y + HEAD_H, x2: width, y2: y + HEAD_H, stroke: INK.ruleStrong, strokeWidth: 0.7 });
+    return y + HEAD_H;
+  }
+
+  /** One row of the list, drawn from `y`. */
+  function drawLine(items, row, widths, y, width) {
+    const { l, cells } = row;
+    const at = [];
+    widths.reduce((x, w) => { at.push(x); return x + w; }, 0);
+    const top = y + PAD_Y;
+    const body = (x, n, text, extra = {}) => items.push({
+      type: 'text', x, y: top + (n + 1) * LL - 2.4, text, size: LF, fill: INK.text, ...extra,
+    });
+    const before = items.length;
+
+    // One square per cancelled day, coloured by whose it was; an outline for a resource struck out.
+    const ink = (TONE[l.party ? PARTY_TONE[l.party] : OPEN_TONE] || TONE.pending).ink;
+    for (let i = 0; i < Math.min(l.days || 1, 14); i++) {
+      items.push({
+        type: 'rect', x: at[0] + PAD_X + i * (SQ_W + SQ_GAP), y: top + 1, w: SQ_W, h: SQ_H, radius: 0.9,
+        ...(l.kind === 'support' ? { fill: 'none', stroke: ink, strokeWidth: 0.9 } : { fill: ink }),
+      });
+    }
+
+    cells.activity.forEach((t, n) => body(at[1] + PAD_X, n, t));
+    const locTop = top + cells.activity.length * LL;
+    cells.location.forEach((t, n) => items.push({
+      type: 'text', x: at[1] + PAD_X, y: locTop + (n + 1) * (LS + 2.6) - 1.6, text: t, size: LS, fill: INK.muted,
+    }));
+
+    badge(items, at[2] + PAD_X, top, l.what, l.kind === 'support' ? 'warn' : 'bad');
+    if (l.removed) badge(items, at[2] + PAD_X, top + BADGE_H + 3, 'Removed from the log', 'neutral');
+
+    /* What BART lost. Struck through in red on an activity that went ahead, as
+       the grid draws a struck-out code; plain on a day cancelled outright. */
+    cells.resources.forEach((t, n) => {
+      const struck = l.kind === 'support' && l.resources;
+      body(at[3] + PAD_X, n, t, struck ? { fill: TONE.bad.ink, weight: 700 } : l.resources ? {} : { fill: INK.muted });
+      if (struck) {
+        const yLine = top + (n + 1) * LL - 2.4 - LF * 0.3;
+        items.push({ type: 'line', x1: at[3] + PAD_X, y1: yLine, x2: at[3] + PAD_X + textWidth(t, LF, 'F2'), y2: yLine, stroke: TONE.bad.ink, strokeWidth: 0.9 });
+      }
+    });
+    cells.cancelled.forEach((t, n) => body(at[4] + PAD_X, n, t));
+    cells.length.forEach((t, n) => body(at[5] + PAD_X, n, t));
+    cells.seen.forEach((t, n) => items.push({
+      type: 'text', x: at[6] + PAD_X, y: top + (n + 1) * (LS + 2.6) - 1.6, text: t, size: LS, fill: INK.muted,
+    }));
+    badge(items, at[7] + PAD_X, top, l.responsible, l.party ? PARTY_TONE[l.party] || 'neutral' : OPEN_TONE);
+    cells.reason.forEach((t, n) => body(at[8] + PAD_X, n, t));
+    const corrTop = top + cells.reason.length * LL;
+    cells.corrected.forEach((t, n) => items.push({
+      type: 'text', x: at[8] + PAD_X, y: corrTop + (n + 1) * (LS + 2.6) - 1.6, text: t, size: LS, fill: INK.muted,
+    }));
+
+    // Removed from the log reads as set aside, as the tab dims it.
+    if (l.removed) for (let i = before; i < items.length; i++) items[i].opacity = 0.55;
+    items.push({ type: 'line', x1: 0, y1: y + row.h, x2: width, y2: y + row.h, stroke: INK.rule, strokeWidth: 0.4 });
+    return y + row.h;
+  }
+
+  /**
+   * The list as page scenes, each the full width of the page at full size — the
+   * counts and a note on the first, the column heads repeated on every one, and
+   * as many rows as fit. A row is never split across two pages.
+   *
+   * @param {object[]} lines        `logLines()`
+   * @param {object} [o]
+   * @param {object} [o.stats]      `logStats()` over what the tab counts — no chips without it
+   * @param {string} [o.note]       what the list is, or how it was narrowed — said, never implied
+   * @param {string} [o.empty]      the words when there is nothing to list
+   * @param {object} [o.page]       `{ pageSize, orientation }` with the title, for the room there is
+   */
+  function listScenes(lines, { stats = null, note = '', empty = 'Nothing cancelled in these dates.', page = {} } = {}) {
+    const room = contentBox({ ...page, title: page.title ?? 'x' });
+    const widths = listWidths(lines, room.w);
+    /* Wider than the page only when the page is too small for the columns; then
+       every page shrinks alike, and holds that many more rows. */
+    const width = Math.max(room.w, widths.reduce((a, b) => a + b, 0));
+    const tall = room.h / Math.min(1, room.w / width);
+    const rows = lines.map((l) => layLine(l, widths));
+    const scenes = [];
+    let items = [];
+    let y = 0;
+    const finish = () => scenes.push({ width, height: Math.max(y, 1), items, meta: { palette: PALETTE } });
+
+    y = stats ? chips(items, statChips(stats), width) + 8 : 0;
+    if (note) {
+      for (const t of wrap(note, width, 6.8)) {
+        items.push({ type: 'text', x: 0, y: y + 7, text: t, size: 6.8, fill: INK.muted });
+        y += 9;
+      }
+      y += 4;
+    }
+    if (!rows.length) {
+      y = listHead(items, widths, y, width);
+      items.push({ type: 'text', x: PAD_X, y: y + 16, text: empty, size: LF, fill: INK.muted });
+      y += 24;
+      finish();
+      return scenes;
+    }
+    y = listHead(items, widths, y, width);
+    let onPage = 0;
+    for (const row of rows) {
+      if (onPage && y + row.h > tall) {
+        finish();
+        items = [];
+        y = listHead(items, widths, 0, width);
+        onPage = 0;
+      }
+      y = drawLine(items, row, widths, y, width);
+      onPage++;
+    }
+    finish();
+    return scenes;
+  }
+
+  /* ── The calendar ──────────────────────────────────────────────────────── */
+
+  const CF = 6.6;
+  const CL = 8.2;
+  const MONTH_H = 12;
+  const NUM_H = 11;
+  const WD_H = 11;
+  const KEY_H = 30;
+  const MIN_ROW = 18;
+
+  /** Fill, ink and outline of a cancelled run, as the calendar on screen and in Excel colour it. */
+  function runPaint(kind, party, red) {
+    const who = party || 'open';
+    if (kind === 'support') {
+      const ink = `#${CANCEL_INK[who] || CANCEL_INK.Other}`;
+      return { fill: null, ink, outline: ink, dashed: who === 'open', textInk: ink };
+    }
+    const hex = who === 'BART' ? String(red || 'FF0000') : CANCEL_FILL[who] || CANCEL_FILL.Other;
+    return {
+      fill: `#${hex}`,
+      ink: isDark(hex) ? INK.onDark : INK.text,
+      outline: who === 'open' ? `#${CANCEL_INK.open}` : null,
+      dashed: who === 'open',
+      textInk: isDark(hex) ? INK.onDark : INK.text,
+    };
+  }
+
+  /**
+   * A run's cell: its fill, and its edge — solid, or dashed while nobody has
+   * said whose it was, so an unanswered run never reads as anybody's. The PDF
+   * writer dashes lines, not rectangles, so a dashed edge is four lines.
+   */
+  function box(items, x, y, w, h, paint, edge) {
+    const solid = paint.outline && !paint.dashed;
+    items.push({
+      type: 'rect', x, y, w, h, radius: paint.dashed ? 0 : 1.5,
+      fill: paint.fill || 'none', stroke: solid ? paint.outline : 'none', strokeWidth: solid ? edge : 0,
+    });
+    if (!paint.dashed || !paint.outline) return;
+    const dash = [2.2, 1.6];
+    const line = (x1, y1, x2, y2) => items.push({ type: 'line', x1, y1, x2, y2, stroke: paint.outline, strokeWidth: edge, dash });
+    line(x, y, x + w, y);
+    line(x + w, y, x + w, y + h);
+    line(x + w, y + h, x, y + h);
+    line(x, y + h, x, y);
+  }
+
+  /**
+   * The calendar as page scenes: the days across (month, number, weekday), one
+   * row per activity with its location, each cancelled run one cell spanning its
+   * days with what went and whose it was and why — the key under every page.
+   * Scaled to the page's width once, and as many rows to a page as then fit, so
+   * a long log runs onto more pages rather than shrinking out of reach.
+   *
+   * @param {object[]} rows   `calendarCells()`
+   * @param {object} o
+   * @param {string[]} o.days     ISO dates, both ends inclusive
+   * @param {string} [o.red]      the legend's cancellation colour, `RRGGBB`
+   * @param {string} [o.today]    an ISO date to mark
+   * @param {object} [o.page]     `{ pageSize, orientation }`
+   */
+  function calendarScenes(rows, { days, red = 'FF0000', today = null, page = {} }) {
+    const area = contentBox({ ...page, title: page.title ?? 'x' });
+    const actW = Math.min(230, Math.max(150, ...rows.map((r) => textWidth(r.label, CF) / 2.2 + 12)));
+    const locW = Math.min(90, Math.max(50, ...rows.map((r) => textWidth(r.location, CF) + 10)));
+    const metaW = actW + locW;
+    const dayW = Math.max(30, (area.w - metaW) / Math.max(1, days.length));
+    const width = metaW + dayW * days.length;
+    const scale = Math.min(1, area.w / width);
+    const room = area.h / scale;
+    const headH = MONTH_H + NUM_H + WD_H;
+    const index = new Map(days.map((d, i) => [d, i]));
+
+    const laid = rows.map((r) => {
+      const label = wrap(r.label || '—', actW - 8, CF, 'F2');
+      const location = wrap(r.location || '', locW - 8, CF);
+      const runs = [];
+      for (const e of r.events) {
+        const a = index.get(e.start < days[0] ? days[0] : e.start);
+        const b = index.get(e.end > days[days.length - 1] ? days[days.length - 1] : e.end);
+        if (a == null || b == null || b < a) continue;
+        runs.push({ e, a, b, text: wrap(e.text, (b - a + 1) * dayW - 6, CF, 'F2') });
+      }
+      const lines = Math.max(label.length, location.length, ...runs.map((x) => x.text.length), 1);
+      return { label, location, runs, h: Math.max(MIN_ROW, lines * CL + 7) };
+    });
+
+    const scenes = [];
+    const pageOf = (slice) => {
+      const items = [];
+      // The month band, a label per run of days.
+      let start = 0;
+      for (let i = 1; i <= days.length; i++) {
+        if (i < days.length && monthLabel(days[i]) === monthLabel(days[start])) continue;
+        const x = metaW + start * dayW;
+        items.push({ type: 'rect', x, y: 0, w: (i - start) * dayW, h: MONTH_H, fill: INK.band });
+        items.push({ type: 'text', x: x + 4, y: MONTH_H - 3.5, text: monthLabel(days[start]), size: CF, weight: 700, fill: INK.muted });
+        start = i;
+      }
+      items.push({ type: 'text', x: 4, y: headH - 4, text: 'Activity', size: CF, weight: 700, fill: INK.muted });
+      items.push({ type: 'text', x: actW + 4, y: headH - 4, text: 'Location', size: CF, weight: 700, fill: INK.muted });
+      days.forEach((d, i) => {
+        const x = metaW + i * dayW;
+        const isToday = d === today;
+        if (isToday) items.push({ type: 'rect', x, y: MONTH_H, w: dayW, h: headH - MONTH_H, fill: INK.todayWash });
+        else if (isWeekend(d)) items.push({ type: 'rect', x, y: MONTH_H, w: dayW, h: headH - MONTH_H, fill: INK.weekend });
+        items.push({ type: 'text', x: x + dayW / 2, y: MONTH_H + NUM_H - 3, text: String(Number(d.slice(8, 10))), size: CF + 0.4, weight: 700, anchor: 'middle', fill: isToday ? INK.today : INK.text });
+        items.push({ type: 'text', x: x + dayW / 2, y: headH - 3.5, text: isToday ? 'Today' : weekdayLetter(d), size: CF - 0.6, anchor: 'middle', fill: isToday ? INK.today : INK.muted });
+      });
+
+      let y = headH;
+      for (const row of slice) {
+        days.forEach((d, i) => {
+          const fill = d === today ? INK.todayWash : isWeekend(d) ? INK.weekend : null;
+          if (fill) items.push({ type: 'rect', x: metaW + i * dayW, y, w: dayW, h: row.h, fill });
+        });
+        row.label.forEach((t, n) => items.push({ type: 'text', x: 4, y: y + 4 + (n + 1) * CL - 1.6, text: t, size: CF, weight: 700, fill: INK.text }));
+        row.location.forEach((t, n) => items.push({ type: 'text', x: actW + 4, y: y + 4 + (n + 1) * CL - 1.6, text: t, size: CF, fill: INK.muted }));
+        for (const run of row.runs) {
+          const x = metaW + run.a * dayW;
+          const w = (run.b - run.a + 1) * dayW;
+          const paint = runPaint(run.e.kind, run.e.party, red);
+          box(items, x + 1, y + 1, w - 2, row.h - 2, paint, 1.2);
+          const block = run.text.length * CL;
+          run.text.forEach((t, n) => {
+            const ty = y + (row.h - block) / 2 + (n + 1) * CL - 1.8;
+            items.push({ type: 'text', x: x + w / 2, y: ty, text: t, size: CF, weight: 700, anchor: 'middle', fill: paint.textInk });
+            // The codes struck out of work that went ahead are drawn through, as on screen.
+            if (n === 0 && run.e.kind === 'support') {
+              const codes = t.replace(/ cancelled$/, '');
+              const tw = textWidth(t, CF, 'F2');
+              const cw = textWidth(codes, CF, 'F2');
+              const x0 = x + w / 2 - tw / 2;
+              items.push({ type: 'line', x1: x0, y1: ty - CF * 0.3, x2: x0 + cw, y2: ty - CF * 0.3, stroke: paint.textInk, strokeWidth: 0.8 });
+            }
+          });
+        }
+        y += row.h;
+        items.push({ type: 'line', x1: 0, y1: y, x2: width, y2: y, stroke: INK.rule, strokeWidth: 0.4 });
+      }
+      const bottom = y;
+      if (!slice.length) {
+        items.push({ type: 'text', x: 4, y: y + 14, text: 'Nothing cancelled in these days.', size: CF + 0.6, fill: INK.muted });
+      }
+      // The rules: a hairline a day, stronger on Mondays and under the heads.
+      days.forEach((d, i) => {
+        const x = metaW + i * dayW;
+        const monday = weekdayLetter(d).toUpperCase() === 'M';
+        items.push({ type: 'line', x1: x, y1: MONTH_H, x2: x, y2: bottom, stroke: monday ? INK.ruleStrong : INK.rule, strokeWidth: monday ? 0.6 : 0.3 });
+      });
+      items.push({ type: 'line', x1: width, y1: 0, x2: width, y2: bottom, stroke: INK.rule, strokeWidth: 0.3 });
+      items.push({ type: 'line', x1: actW, y1: MONTH_H, x2: actW, y2: bottom, stroke: INK.rule, strokeWidth: 0.4 });
+      items.push({ type: 'line', x1: 0, y1: headH, x2: width, y2: headH, stroke: INK.ruleStrong, strokeWidth: 0.7 });
+
+      // What each colour says, in words beside it.
+      const keyTop = Math.max(bottom, headH) + (slice.length ? 10 : 24);
+      let kx = 0;
+      const key = [
+        [runPaint('activity', 'BART', red), 'BART'],
+        [runPaint('activity', 'Hitachi', red), 'Hitachi'],
+        [runPaint('activity', 'Other', red), 'Other'],
+        [runPaint('activity', null, red), 'No reason yet'],
+        [{ fill: null, outline: INK.muted }, 'Outlined: a BART resource struck out, the activity went ahead'],
+      ];
+      for (const [paint, said] of key) {
+        box(items, kx, keyTop, 12, 8, paint, 1);
+        items.push({ type: 'text', x: kx + 16, y: keyTop + 7, text: said, size: CF, fill: INK.text });
+        kx += 16 + textWidth(said, CF) + 14;
+      }
+      return { width, height: keyTop + KEY_H - 10, items, meta: { palette: PALETTE } };
+    };
+
+    let slice = [];
+    let used = headH + KEY_H;
+    for (const row of laid) {
+      if (slice.length && used + row.h > room) {
+        scenes.push(pageOf(slice));
+        slice = [];
+        used = headH + KEY_H;
+      }
+      slice.push(row);
+      used += row.h;
+    }
+    scenes.push(pageOf(slice));
+    return scenes;
+  }
+
+  /* ── The PDFs ──────────────────────────────────────────────────────────── */
+
+  /**
+   * The list as the Cancellations tab draws it, as a PDF — on as many pages as
+   * it needs, every one at full size. Returns a Blob, for `saveFile()`.
+   *
+   * @param {object[]} lines      `logLines()`
+   * @param {object} [o]
+   * @param {object} [o.stats]    `logStats()`, drawn as the tab's chips
+   * @param {string} [o.note]
+   * @param {string} [o.title]
+   * @param {string} [o.subtitle]
+   * @param {string} [o.pageSize] a key of `PAGE_SIZES`
+   * @param {string} [o.footer]
+   */
+  function cancellationListPdf(lines, { stats, note = '', title = 'Cancellation log', subtitle = '', pageSize = 'a4', footer } = {}) {
+    const page = { pageSize, orientation: 'landscape', title };
+    const scenes = listScenes(lines, { stats, note, page });
+    return fitPagesToPdf(scenes.map((scene) => ({ scene, maxScale: 1 })), { ...page, subtitle, footer, author: 'CX Timeline' });
+  }
+
+  /**
+   * The delay log as a PDF: the list first, then the same events as a calendar
+   * of the days it covers. Returns a Blob.
+   *
+   * @param {object} o
+   * @param {object[]} o.events     `cancellationLog()` events, as listed
+   * @param {string[]} o.days       the days the log covers
+   * @param {string} [o.red]        the legend's cancellation colour, `RRGGBB`
+   * @param {string} [o.today]      an ISO date to mark on the calendar
+   * @param {(id: any) => string} [o.who]  an author's name from its id
+   * @param {string} [o.title]
+   * @param {string} [o.subtitle]   the span in words; the dates when not given
+   * @param {string} [o.note]       a line under the counts saying what is listed
+   * @param {string} [o.pageSize]   a key of `PAGE_SIZES`
+   * @param {string} [o.footer]
+   */
+  function delayLogPdf({ events, days, red = 'FF0000', today = null, who, title = 'Delay log', subtitle = '', note = '', pageSize = 'a4', footer }) {
+    const page = { pageSize, orientation: 'landscape', title };
+    const list = listScenes(logLines(events, { who }), { stats: logStats(events), note, page });
+    const calendar = calendarScenes(calendarCells(events), { days, red, today, page });
+    const span = days.length ? `${dayText(days[0])} to ${dayText(days[days.length - 1])}` : '';
+    return fitPagesToPdf([
+      ...list.map((scene) => ({ scene, maxScale: 1, subtitle: `${subtitle || span}  ·  As a list` })),
+      ...calendar.map((scene) => ({ scene, maxScale: 1, subtitle: `${subtitle || span}  ·  As a calendar` })),
+    ], { ...page, footer, author: 'CX Timeline' });
+  }
+
+  Object.defineProperty(__x, "CANCEL_PARTIES", { get: () => CANCEL_PARTIES, enumerable: true });
+  Object.defineProperty(__x, "CANCEL_FILL", { get: () => CANCEL_FILL, enumerable: true });
+  Object.defineProperty(__x, "CANCEL_INK", { get: () => CANCEL_INK, enumerable: true });
+  Object.defineProperty(__x, "KIND_LABEL", { get: () => KIND_LABEL, enumerable: true });
+  Object.defineProperty(__x, "PARTY_TONE", { get: () => PARTY_TONE, enumerable: true });
+  Object.defineProperty(__x, "OPEN_TONE", { get: () => OPEN_TONE, enumerable: true });
+  Object.defineProperty(__x, "partyOf", { get: () => partyOf, enumerable: true });
+  Object.defineProperty(__x, "dayText", { get: () => dayText, enumerable: true });
+  Object.defineProperty(__x, "spanText", { get: () => spanText, enumerable: true });
+  Object.defineProperty(__x, "seenText", { get: () => seenText, enumerable: true });
+  Object.defineProperty(__x, "spanDays", { get: () => spanDays, enumerable: true });
+  Object.defineProperty(__x, "runText", { get: () => runText, enumerable: true });
+  Object.defineProperty(__x, "calendarRows", { get: () => calendarRows, enumerable: true });
+  Object.defineProperty(__x, "calendarCells", { get: () => calendarCells, enumerable: true });
+  Object.defineProperty(__x, "logLines", { get: () => logLines, enumerable: true });
+  Object.defineProperty(__x, "logStats", { get: () => logStats, enumerable: true });
+  Object.defineProperty(__x, "statChips", { get: () => statChips, enumerable: true });
+  Object.defineProperty(__x, "statsText", { get: () => statsText, enumerable: true });
+  Object.defineProperty(__x, "listScenes", { get: () => listScenes, enumerable: true });
+  Object.defineProperty(__x, "calendarScenes", { get: () => calendarScenes, enumerable: true });
+  Object.defineProperty(__x, "cancellationListPdf", { get: () => cancellationListPdf, enumerable: true });
+  Object.defineProperty(__x, "delayLogPdf", { get: () => delayLogPdf, enumerable: true });
+};
+
 // io/la_xlsx.js
 __mods["io/la_xlsx.js"] = function (__x, __req) {
   /**
@@ -7459,23 +8179,21 @@ __mods["io/la_xlsx.js"] = function (__x, __req) {
    * No DOM — `tools/test_la_edit.js` writes one and reads it back through
    * `parseSheet()`, the same reader that reads BART's file.
    *
-   * Imports: core/la_edit, io/xlsx_write, io/lookahead.
+   * Imports: core/la_edit, io/xlsx_write, io/lookahead, io/cancel_log.
    */
 
   const { FIELDS, LAYOUT, SECTION_BAND, rowsWithWork, getCell, metaValues, colLetters, isWeekend, weekdayLetter, monthLabel, cancelledTokens } = __req("core/la_edit.js");
 
 
 
-  const { zipStore, xmlEscape, styleBook, workbookParts } = __req("io/xlsx_write.js");
+  const { zipStore, xmlEscape, styleBook, workbookParts, dateSerial, dateTimeSerial, CELL_LIMIT } = __req("io/xlsx_write.js");
+
+
   const { isDark } = __req("io/lookahead.js");
   const { cellTokens } = __req("core/lookahead.js");
+  const { CANCEL_FILL, CANCEL_INK, statsText } = __req("io/cancel_log.js");
 
   const WEEKEND = '7F7F7F';
-  /* The cancellation log's colours, as `--la-cancel-*` draws them on screen:
-     a fill per answer for a day cancelled outright (BART's is the legend's red,
-     passed in), and writing a white sheet can carry for a resource struck out. */
-  const CANCEL_FILL = { Hitachi: '0070C0', Other: 'FFC000', open: 'E4D7F5' };
-  const CANCEL_INK = { BART: 'FF0000', Hitachi: '0070C0', Other: 'C55A11', open: '7030A0' };
   const DAY_WIDTH = 12.7109375;
   const LINE = 12.75;
 
@@ -7777,6 +8495,16 @@ __mods["io/la_xlsx.js"] = function (__x, __req) {
    */
   function cancellationWorkbook({ days, rows, title = 'Cancellations', subtitle = '', red = 'FF0000' }) {
     const styles = styleBook();
+    const sheet = cancellationSheet(styles, { days, rows, title, subtitle, red });
+    return zipStore(workbookParts({ sheetName: 'Cancellations', sheetXml: sheet.xml, stylesXml: styles.xml(), printTitles: sheet.printTitles, title }));
+  }
+
+  /**
+   * The calendar's worksheet, its styles added to `styles` — for a workbook of
+   * its own or as one sheet of several (`delayLogWorkbook()`). `selected` makes
+   * it the tab the workbook opens on; only one sheet of a workbook may be.
+   */
+  function cancellationSheet(styles, { days, rows, title, subtitle, red, selected = true }) {
     const all = 'lrtb';
     const S = {
       title: styles.id({ bold: true, size: 14, v: 'center' }),
@@ -7878,7 +8606,7 @@ __mods["io/la_xlsx.js"] = function (__x, __req) {
       + 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
       + '<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>'
       + `<dimension ref="A1:${colLetters(lastCol)}${r}"/>`
-      + '<sheetViews><sheetView tabSelected="1" zoomScale="80" zoomScaleNormal="80" workbookViewId="0">'
+      + `<sheetViews><sheetView${selected ? ' tabSelected="1"' : ''} zoomScale="80" zoomScaleNormal="80" workbookViewId="0">`
       + `<pane xSplit="${first - 1}" ySplit="6" topLeftCell="${colLetters(first)}7" activePane="bottomRight" state="frozen"/>`
       + '</sheetView></sheetViews>'
       + `<sheetFormatPr defaultRowHeight="${LINE}"/>`
@@ -7889,13 +8617,178 @@ __mods["io/la_xlsx.js"] = function (__x, __req) {
       + '<pageSetup paperSize="17" orientation="landscape" fitToWidth="1" fitToHeight="0"/>'
       + '</worksheet>';
 
-    return zipStore(workbookParts({ sheetName: 'Cancellations', sheetXml, stylesXml: styles.xml(), printTitles: '$4:$6', title }));
+    return { xml: sheetXml, printTitles: '$4:$6' };
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════
+     The cancellation log as a list, and the delay log
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  /** The list's columns: what the Cancellations tab shows, with its dates and numbers as Excel's own. */
+  const LIST_COLUMNS = [
+    { key: 'label', heading: 'Activity', width: 46, wrap: true },
+    { key: 'location', heading: 'Location', width: 14, wrap: true },
+    { key: 'what', heading: 'What', width: 22 },
+    { key: 'resources', heading: 'BART resources', width: 18, wrap: true },
+    { key: 'start', heading: 'From', width: 11, kind: 'date' },
+    { key: 'end', heading: 'To', width: 11, kind: 'date' },
+    { key: 'days', heading: 'Days', width: 7, kind: 'number' },
+    { key: 'responsible', heading: 'Responsible', width: 15, kind: 'party' },
+    { key: 'reason', heading: 'Reason', width: 50, wrap: true },
+    { key: 'loggedBy', heading: 'Logged by', width: 16 },
+    { key: 'loggedAt', heading: 'Logged on', width: 16, kind: 'instant' },
+    { key: 'reads', heading: 'Readings', width: 10, kind: 'number' },
+    { key: 'firstSeen', heading: 'First seen', width: 11, kind: 'day' },
+  ];
+  const LIST_BORDER = 'D9D9D9';
+
+  /**
+   * The list's worksheet: a title, the span, the counts, and under them one
+   * table — a heading row frozen and filtered, a row per cancellation, dates
+   * that sort as dates, and the Responsible cell in whose colour it was, the
+   * same as the calendar's (BART the legend's red, Hitachi blue, another party
+   * amber, no reason yet lavender) with the party in words in it.
+   */
+  function cancellationListSheet(styles, {
+    lines: entries, stats, title, subtitle = '', red = 'FF0000', selected = true, empty = 'Nothing was cancelled in these dates.',
+  }) {
+    const cell = { border: 'lrtb', borderColor: LIST_BORDER, v: 'top' };
+    const S = {
+      title: styles.id({ bold: true, size: 14, v: 'center' }),
+      sub: styles.id({ color: '595959', v: 'center' }),
+      head: styles.id({ bold: true, fill: 'F2F2F2', border: 'lrtb', borderColor: 'BFBFBF', v: 'center', wrap: true }),
+      text: styles.id({ ...cell, wrap: true }),
+      number: styles.id({ ...cell, h: 'center' }),
+      date: styles.id({ ...cell, h: 'left', numFmt: 15 }),
+      instant: styles.id({ ...cell, h: 'left', numFmt: 22 }),
+      // A BART resource struck out of work that went ahead, as the grid draws it.
+      struck: styles.id({ ...cell, wrap: true, bold: true, strike: true, color: 'C00000' }),
+      removed: styles.id({ ...cell, wrap: true, italic: true, color: '808080' }),
+      empty: styles.id({ italic: true, color: '808080' }),
+    };
+    const party = (p) => {
+      const who = p == null ? 'open' : p in CANCEL_INK ? p : 'Other';
+      const fill = who === 'BART' ? String(red).toUpperCase() : CANCEL_FILL[who];
+      return styles.id({
+        ...cell, h: 'center', bold: true, italic: who === 'open', fill,
+        color: who === 'open' ? CANCEL_INK.open : isDark(fill) ? 'FFFFFF' : '000000',
+      });
+    };
+    const columns = entries.some((l) => l.removed)
+      ? [...LIST_COLUMNS, { key: 'removed', heading: 'Removed from the log', width: 12 }]
+      : LIST_COLUMNS;
+    const ref = (c, r) => `${colLetters(c + 1)}${r}`;
+    const str = (c, r, text, s) => (text === '' || text == null
+      ? `<c r="${ref(c, r)}" s="${s}"/>`
+      : `<c r="${ref(c, r)}" s="${s}" t="inlineStr"><is><t xml:space="preserve">${xmlEscape(String(text).slice(0, CELL_LIMIT))}</t></is></c>`);
+    const val = (c, r, n, s) => (n == null || !Number.isFinite(n)
+      ? `<c r="${ref(c, r)}" s="${s}"/>`
+      : `<c r="${ref(c, r)}" s="${s}"><v>${n}</v></c>`);
+    const rowsXml = [];
+    const addRow = (r, cells, ht = null) => rowsXml.push(`<row r="${r}"${ht ? ` ht="${ht}" customHeight="1"` : ''}>${cells.join('')}</row>`);
+
+    addRow(1, [str(0, 1, title, S.title)], 21);
+    if (subtitle) addRow(2, [str(0, 2, subtitle, S.sub)]);
+    if (stats) addRow(3, [str(0, 3, statsText(stats), S.sub)]);
+    const HEAD = 5;
+    addRow(HEAD, columns.map((c, i) => str(i, HEAD, c.heading, S.head)), 18);
+
+    let r = HEAD + 1;
+    for (const l of entries) {
+      const cells = columns.map((c, i) => {
+        const v = c.key === 'removed' ? (l.removed ? 'Yes' : '') : l[c.key];
+        if (c.kind === 'date') return val(i, r, dateSerial(v), S.date);
+        // The day an instant fell on, on this computer's calendar.
+        if (c.kind === 'day') return val(i, r, v ? Math.floor(dateTimeSerial(v) ?? NaN) : null, S.date);
+        if (c.kind === 'instant') return val(i, r, v ? +(dateTimeSerial(v) ?? NaN).toFixed(6) : null, S.instant);
+        if (c.kind === 'number') return val(i, r, Number(v) || 0, S.number);
+        if (c.kind === 'party') return str(i, r, v, party(l.party));
+        if (c.key === 'resources' && l.kind === 'support' && v) return str(i, r, v, S.struck);
+        if (c.key === 'what' && l.removed) return str(i, r, v, S.removed);
+        return str(i, r, v, S.text);
+      });
+      const height = Math.max(1, ...columns.filter((c) => c.wrap).map((c) => lines(String(l[c.key] ?? ''), c.width)));
+      addRow(r, cells, height > 1 ? +(height * LINE + 1.5).toFixed(2) : null);
+      r++;
+    }
+    if (!entries.length) {
+      addRow(r, [str(0, r, empty, S.empty)]);
+      r++;
+    }
+    const last = colLetters(columns.length);
+    const lastRow = Math.max(HEAD + 1, r - 1);
+    const xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+      + '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+      + 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+      + '<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>'
+      + `<dimension ref="A1:${last}${lastRow}"/>`
+      + `<sheetViews><sheetView${selected ? ' tabSelected="1"' : ''} workbookViewId="0">`
+      + `<pane ySplit="${HEAD}" topLeftCell="A${HEAD + 1}" activePane="bottomLeft" state="frozen"/>`
+      + `<selection pane="bottomLeft" activeCell="A${HEAD + 1}" sqref="A${HEAD + 1}"/></sheetView></sheetViews>`
+      + `<sheetFormatPr defaultRowHeight="${LINE}"/>`
+      + `<cols>${columns.map((c, i) => `<col min="${i + 1}" max="${i + 1}" width="${c.width}" customWidth="1"/>`).join('')}</cols>`
+      + `<sheetData>${rowsXml.join('')}</sheetData>`
+      + `<autoFilter ref="A${HEAD}:${last}${lastRow}"/>`
+      + '<pageMargins left="0.4" right="0.4" top="0.6" bottom="0.6" header="0.3" footer="0.3"/>'
+      + '<pageSetup orientation="landscape" fitToWidth="1" fitToHeight="0"/>'
+      + '</worksheet>';
+    return { xml, printTitles: `$${HEAD}:$${HEAD}`, filter: `$A$${HEAD}:$${last}$${lastRow}` };
+  }
+
+  /**
+   * The cancellation log as a list, in Excel — what the Cancellations tab's
+   * Export to Excel saves: exactly the rows on screen.
+   *
+   * `lines` is `logLines()` (`io/cancel_log.js`), `stats` `logStats()` over what
+   * the tab counts.
+   *
+   * @param {object} o
+   * @param {object[]} o.lines
+   * @param {object} [o.stats]
+   * @param {string} [o.title]
+   * @param {string} [o.subtitle]
+   * @param {string} [o.red]
+   * @param {string} [o.empty]
+   */
+  function cancellationListWorkbook({ lines: entries, stats, title = 'Cancellation log', subtitle = '', red = 'FF0000', empty }) {
+    const styles = styleBook();
+    const sheet = cancellationListSheet(styles, { lines: entries, stats, title, subtitle, red, empty });
+    return zipStore(workbookParts({
+      sheetName: 'Cancellations', sheetXml: '', stylesXml: styles.xml(), title,
+      sheets: [{ name: 'Cancellations', ...sheet }],
+    }));
+  }
+
+  /**
+   * The delay log in Excel: the list on the first sheet and the same events as a
+   * calendar of its days on the second, one style table between them.
+   *
+   * @param {object} o
+   * @param {object[]} o.lines    `logLines()`
+   * @param {object} [o.stats]    `logStats()`
+   * @param {string[]} o.days     the days the calendar covers
+   * @param {object[]} o.rows     `calendarCells()`
+   * @param {string} [o.title]
+   * @param {string} [o.subtitle]
+   * @param {string} [o.red]
+   * @param {string} [o.empty]
+   */
+  function delayLogWorkbook({ lines: entries, stats, days, rows, title = 'Delay log', subtitle = '', red = 'FF0000', empty }) {
+    const styles = styleBook();
+    const list = cancellationListSheet(styles, { lines: entries, stats, title, subtitle, red, empty, selected: true });
+    const calendar = cancellationSheet(styles, { days, rows, title: `${title} — as a calendar`, subtitle, red, selected: false });
+    return zipStore(workbookParts({
+      sheetName: 'Delay log', sheetXml: '', stylesXml: styles.xml(), title,
+      sheets: [{ name: 'Delay log', ...list }, { name: 'Calendar', ...calendar }],
+    }));
   }
 
   Object.defineProperty(__x, "lookaheadWorkbook", { get: () => lookaheadWorkbook, enumerable: true });
   Object.defineProperty(__x, "lookaheadFileName", { get: () => lookaheadFileName, enumerable: true });
   Object.defineProperty(__x, "lookaheadLatestName", { get: () => lookaheadLatestName, enumerable: true });
   Object.defineProperty(__x, "cancellationWorkbook", { get: () => cancellationWorkbook, enumerable: true });
+  Object.defineProperty(__x, "cancellationListWorkbook", { get: () => cancellationListWorkbook, enumerable: true });
+  Object.defineProperty(__x, "delayLogWorkbook", { get: () => delayLogWorkbook, enumerable: true });
 };
 
 // core/export_schedule.js
@@ -8432,35 +9325,33 @@ __mods["ui/rc_la_export.js"] = function (__x, __req) {
   // 4WLA_Latest.xlsx on a schedule is built here; that module files it.
   provide4wla({ xlsx: () => lookaheadFileNow() });
 
-  /** The 4WLA as an .xlsx — from the editor, or from the calendar's read view. */
-  async function openExcelExport() {
-    let src;
-    try {
-      src = await exportSource();
-    } catch (err) {
-      toast({ tone: 'bad', message: err.message, timeout: 10000 });
-      rc.reportError('lookahead:export', err);
-      return;
-    }
+  /**
+   * Which weeks, how many, and whether the names come — Export to Excel's
+   * choices as fields, for its own dialog and for the zip beside the delay log
+   * (`ui/rc_la_delay.js`), so the 4WLA in the zip is the one Export to Excel
+   * would save. `days()` and `resources()` read what is chosen.
+   */
+  async function lookaheadChoices(src, { weeks: initialWeeks = src.weeks } = {}) {
     const thisMonday = ed.mondayOf(todayISO());
     const starts = [-7, 0, 7, 14].map((d) => ed.addDaysISO(thisMonday, d));
     const start = selectInput({
       value: thisMonday,
       options: starts.map((d, i) => ({ value: d, label: `${['Last week', 'This week', 'Next week', 'In two weeks'][i]} — from ${fmt(d)}` })),
     });
-    let weeks = src.weeks;
+    let weeks = ed.WINDOW_WEEKS.includes(initialWeeks) ? initialWeeks : 4;
     const size = segmented({
       value: weeks,
       options: ed.WINDOW_WEEKS.map((w) => ({ value: w, label: `${w} weeks` })),
       onChange: (w) => { weeks = w; update(); },
     });
     const summary = el('div', { class: 'rc-hint' });
+    const days = () => ed.windowDays(start.value, weeks);
     const update = async () => {
-      const days = ed.windowDays(start.value, weeks);
-      await src.ensure(days).catch(() => {});
-      const rows = ed.rowsWithWork(src.model, days);
+      const shown = days();
+      await src.ensure(shown).catch(() => {});
+      const rows = ed.rowsWithWork(src.model, shown);
       const n = rows.filter((r) => r.kind === 'activity').length;
-      summary.textContent = `${n} activit${n === 1 ? 'y' : 'ies'} with work between ${fmt(days[0])} and ${fmt(days[days.length - 1])}, `
+      summary.textContent = `${n} activit${n === 1 ? 'y' : 'ies'} with work between ${fmt(shown[0])} and ${fmt(shown[shown.length - 1])}, `
         + (la.exportResources
           ? 'with their sections, names rows and the PTO / Office / Other group rows'
           : 'with their sections — no names rows, and no PTO / Office / Other group rows')
@@ -8474,27 +9365,49 @@ __mods["ui/rc_la_export.js"] = function (__x, __req) {
     resourcesBox.classList.add('lae-export-resources');
     start.addEventListener('change', update);
     await update();
-
-    const canFolder = filestore.hasFolder?.();
-    const build = async () => {
-      const days = ed.windowDays(start.value, weeks);
-      await src.ensure(days);
-      const settings = await rc.listSettings().catch(() => []);
-      const sheetName = settings.find((r) => r.key === 'lookahead_sheet')?.value || '4WLA';
-      const bytes = lookaheadWorkbook({
-        model: src.model, days, legend: src.legend, codes: src.codes.filter((c) => c.active !== false), title: src.title, sheetName,
-        resources: la.exportResources,
-      });
-      return { bytes, name: lookaheadFileName(days, sheetName) };
-    };
-    openModal({
-      title: 'Export to Excel',
-      subtitle: 'The same columns, merged headings and colours as the 4WLA',
-      body: el('div', { class: 'lae-form' }, [
+    return {
+      fields: [
         el('label', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'Starting' }), start]),
         el('div', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'Weeks' }), size]),
         resourcesBox,
         summary,
+      ],
+      days,
+      resources: () => la.exportResources,
+    };
+  }
+
+  /** The 4WLA workbook for those days, in the 4WLA layout, named for its window. */
+  async function lookaheadBook(src, days, { resources = la.exportResources } = {}) {
+    await src.ensure(days);
+    const settings = await rc.listSettings().catch(() => []);
+    const sheetName = settings.find((r) => r.key === 'lookahead_sheet')?.value || '4WLA';
+    const bytes = lookaheadWorkbook({
+      model: src.model, days, legend: src.legend, codes: src.codes.filter((c) => c.active !== false), title: src.title, sheetName,
+      resources,
+    });
+    return { bytes, name: lookaheadFileName(days, sheetName) };
+  }
+
+  /** The 4WLA as an .xlsx — from the editor, or from the calendar's read view. */
+  async function openExcelExport() {
+    let src;
+    try {
+      src = await exportSource();
+    } catch (err) {
+      toast({ tone: 'bad', message: err.message, timeout: 10000 });
+      rc.reportError('lookahead:export', err);
+      return;
+    }
+    const choices = await lookaheadChoices(src);
+
+    const canFolder = filestore.hasFolder?.();
+    const build = () => lookaheadBook(src, choices.days(), { resources: choices.resources() });
+    openModal({
+      title: 'Export to Excel',
+      subtitle: 'The same columns, merged headings and colours as the 4WLA',
+      body: el('div', { class: 'lae-form' }, [
+        ...choices.fields,
         // The same 4WLA, filed as 4WLA_Latest on a schedule for sending on.
         scheduleSection(),
       ]),
@@ -8526,8 +9439,260 @@ __mods["ui/rc_la_export.js"] = function (__x, __req) {
     });
   }
 
+  Object.defineProperty(__x, "exportSource", { get: () => exportSource, enumerable: true });
   Object.defineProperty(__x, "lookaheadFileNow", { get: () => lookaheadFileNow, enumerable: true });
+  Object.defineProperty(__x, "lookaheadChoices", { get: () => lookaheadChoices, enumerable: true });
+  Object.defineProperty(__x, "lookaheadBook", { get: () => lookaheadBook, enumerable: true });
   Object.defineProperty(__x, "openExcelExport", { get: () => openExcelExport, enumerable: true });
+};
+
+// ui/rc_la_delay.js
+__mods["ui/rc_la_delay.js"] = function (__x, __req) {
+  /**
+   * The 4WLA and the delay log, as one .zip.
+   *
+   * What goes out to the people the look-ahead is sent to, in one file: the 4WLA
+   * workbook exactly as Export to Excel saves it (`lookaheadChoices()` and
+   * `lookaheadBook()` are that dialog's own), and the delay log for the days
+   * just gone — the cancellation log over that span, read by
+   * `cancellationLog()` as the Cancellations tab reads it — twice: as a PDF (the
+   * list as the tab draws it, then the same events as a calendar) and as an
+   * Excel workbook (the list on one sheet, the calendar on the next).
+   *
+   * The span is the last ten days up to and including today unless somebody
+   * says otherwise, and every file says which days it covers. A cancellation is
+   * in it when it starts inside the span, and is listed whole — the log's own
+   * rule, so the zip and the tab with the same dates agree.
+   *
+   * Imports: util, rc, filestore, core/la_edit, core/lookahead, io/la_xlsx,
+   *          io/cancel_log, io/xlsx_write, io/exporters, icons, components,
+   *          rc_util, rc_la_export.
+   */
+
+  const { el } = __req("core/util.js");
+  const rc = __req("core/rc.js");
+  const filestore = __req("core/filestore.js");
+  const ed = __req("core/la_edit.js");
+  const { isCancelMeaning } = __req("core/lookahead.js");
+  const { delayLogWorkbook, lookaheadFileName } = __req("io/la_xlsx.js");
+  const { delayLogPdf, logLines, logStats, calendarCells, spanDays, dayText } = __req("io/cancel_log.js");
+  const { zipDeflate } = __req("io/xlsx_write.js");
+  const { saveFile } = __req("io/exporters.js");
+  const { icon } = __req("ui/icons.js");
+  const { toast, openModal } = __req("ui/components.js");
+  const { todayISO, cancellationLog, authorNames } = __req("ui/rc_util.js");
+  const { exportSource, lookaheadChoices, lookaheadBook } = __req("ui/rc_la_export.js");
+
+  /** How many days the delay log covers unless somebody says otherwise. */
+  const DELAY_DAYS = 10;
+  const MAX_DAYS = 92;
+  const EXPORT_DIR = 'exports';
+
+  /** The span: `count` days, up to and including `to`. */
+  function delaySpan(to = todayISO(), count = DELAY_DAYS) {
+    const n = Math.min(MAX_DAYS, Math.max(1, Math.round(Number(count) || DELAY_DAYS)));
+    return { from: ed.addDaysISO(to, -(n - 1)), to, days: n };
+  }
+
+  /** The cancellations that start inside the span, kept whole, none of those removed from the log. */
+  async function delayEvents(from, to) {
+    return (await cancellationLog(from)).filter((e) => e.start <= to && !e.dismissed);
+  }
+
+  /** The legend's own cancellation red, `RRGGBB` — what BART's days are filled with. */
+  function cancelRed(legendRows) {
+    return String(legendRows.find((l) => isCancelMeaning(l.meaning || ''))?.argb || 'FF0000').toUpperCase();
+  }
+
+  /**
+   * The delay log for a span, as a PDF and a workbook: `{ events, pdf, xlsx }`,
+   * each file `{ name, bytes }`.
+   */
+  async function delayLogFiles({ from, to, today = todayISO() }) {
+    const [events, legendRows, people] = await Promise.all([
+      delayEvents(from, to),
+      rc.listLegend().catch(() => []),
+      rc.listPeople({ includeInactive: true }).catch(() => []),
+    ]);
+    const red = cancelRed(legendRows);
+    const who = authorNames(people);
+    const days = spanDays(from, to);
+    const span = `${dayText(from)} to ${dayText(to)}`;
+    const empty = `Nothing was cancelled from ${span}.`;
+    const base = `Delay log ${from} to ${to}`;
+    const xlsx = delayLogWorkbook({
+      lines: logLines(events, { who }),
+      stats: logStats(events),
+      days,
+      rows: calendarCells(events),
+      title: 'Delay log',
+      subtitle: `${span}  ·  ${events.length} cancellation${events.length === 1 ? '' : 's'}`,
+      red,
+      empty,
+    });
+    const pdf = delayLogPdf({
+      events, days, red, today, who,
+      title: 'Delay log',
+      subtitle: span,
+      note: `Every day the look-ahead shows cancelled from ${span}, and every BART resource struck out of work that `
+        + 'went ahead — as the cancellation log has it now, without the ones removed from it. A cancellation '
+        + `that runs on past ${dayText(to)} is listed whole; the calendar shows its days up to then.`,
+    });
+    return {
+      events,
+      pdf: { name: `${base}.pdf`, bytes: new Uint8Array(await pdf.arrayBuffer()) },
+      xlsx: { name: `${base}.xlsx`, bytes: xlsx },
+    };
+  }
+
+  /**
+   * The zip: the 4WLA for `days` and the delay log for the span. Answers `{
+   * name, bytes, files, events }` — `files` the names inside, in order.
+   */
+  async function buildDelayPack({ src = null, days, resources, from, to, today = todayISO() }) {
+    const source = src || await exportSource();
+    const book = await lookaheadBook(source, days, { resources });
+    const log = await delayLogFiles({ from, to, today });
+    const files = [
+      { name: book.name, data: book.bytes },
+      { name: log.pdf.name, data: log.pdf.bytes },
+      { name: log.xlsx.name, data: log.xlsx.bytes },
+    ];
+    return {
+      name: `4WLA and delay log ${today}.zip`,
+      bytes: await zipDeflate(files),
+      files: files.map((f) => f.name),
+      events: log.events.length,
+    };
+  }
+
+  /** The dialog: the 4WLA's weeks as Export to Excel offers them, and the delay log's days. */
+  async function openDelayExport() {
+    let src;
+    try {
+      src = await exportSource();
+    } catch (err) {
+      toast({ tone: 'bad', message: err.message, timeout: 10000 });
+      rc.reportError('lookahead:delay-export', err);
+      return;
+    }
+    const choices = await lookaheadChoices(src, { weeks: 4 });
+    const sheetName = (await rc.listSettings().catch(() => [])).find((r) => r.key === 'lookahead_sheet')?.value || '4WLA';
+    const today = todayISO();
+    const count = el('input', {
+      type: 'number', class: 'cx-input la-delay-days', min: '1', max: String(MAX_DAYS), value: String(DELAY_DAYS),
+      'aria-label': 'How many days the delay log covers', style: 'width:90px',
+    });
+    const end = el('input', {
+      type: 'date', class: 'cx-input la-delay-end', value: today,
+      'aria-label': 'The last day the delay log covers', style: 'width:160px',
+    });
+    const said = el('p', { class: 'rc-hint la-delay-summary', role: 'status' });
+    const inside = el('ul', { class: 'rc-hint la-delay-files', style: 'margin:4px 0 0;padding-left:18px' });
+    const span = () => delaySpan(end.value || today, count.value);
+
+    /* What the zip will hold, named as it will be — redrawn whenever a choice
+       changes, the 4WLA's weeks (buttons, not a field) included. */
+    const names = () => {
+      const { from, to } = span();
+      inside.replaceChildren(...[
+        `${lookaheadFileName(choices.days(), sheetName)} — the look-ahead, as Export to Excel saves it`,
+        `Delay log ${from} to ${to}.pdf — the list, then the same days as a calendar`,
+        `Delay log ${from} to ${to}.xlsx — the list on one sheet, the calendar on the next`,
+      ].map((t) => el('li', { text: t })));
+    };
+    let asked = 0;
+    const update = async () => {
+      names();
+      const mine = ++asked;
+      const { from, to } = span();
+      said.textContent = `${dayText(from)} to ${dayText(to)} — counting…`;
+      const events = await delayEvents(from, to).catch(() => null);
+      if (mine !== asked) return;
+      if (!events) {
+        said.textContent = `${dayText(from)} to ${dayText(to)} — the cancellation log could not be read.`;
+        return;
+      }
+      const open = events.filter((e) => !e.note).length;
+      said.textContent = `${dayText(from)} to ${dayText(to)}: `
+        + (events.length
+          ? `${events.length} cancellation${events.length === 1 ? '' : 's'}`
+            + `${open ? `, ${open} with no reason yet` : ''}.`
+          : 'nothing was cancelled — the files say so.');
+    };
+    for (const input of [count, end]) input.addEventListener('change', update);
+    for (const field of choices.fields) {
+      field.addEventListener('change', names);
+      field.addEventListener('click', names);
+    }
+    await update();
+
+    const build = async () => {
+      const { from, to } = span();
+      return buildDelayPack({ src, days: choices.days(), resources: choices.resources(), from, to, today });
+    };
+    const canFolder = filestore.hasFolder?.();
+    openModal({
+      title: '4WLA and delay log',
+      subtitle: 'One .zip: the look-ahead in Excel, and the delay log as a PDF and in Excel',
+      body: el('div', { class: 'lae-form la-delay-form' }, [
+        el('div', { class: 'cx-label', text: 'The 4WLA' }),
+        ...choices.fields,
+        el('div', { class: 'cx-label', style: 'margin-top:10px', text: 'The delay log' }),
+        el('div', { class: 'cx-field', style: 'display:flex;gap:8px;align-items:center;flex-wrap:wrap' }, [
+          el('span', { text: 'The last' }), count, el('span', { text: 'days, up to and including' }), end,
+        ]),
+        said,
+        el('div', { class: 'cx-label', style: 'margin-top:10px', text: 'In the .zip' }),
+        inside,
+      ]),
+      actions: [
+        { label: 'Cancel' },
+        canFolder ? {
+          label: 'Save to the shared folder', onClick: async () => {
+            try {
+              const pack = await build();
+              await filestore.intakeWrite(`${EXPORT_DIR}/${pack.name}`, pack.bytes);
+              toast({ tone: 'good', title: 'Saved to the shared folder', message: `${EXPORT_DIR}/${pack.name}` });
+            } catch (err) {
+              rc.reportError('lookahead:delay-export', err);
+              toast({ tone: 'bad', message: err.message, timeout: 10000 });
+            }
+          },
+        } : null,
+        {
+          label: 'Download', kind: 'primary', autofocus: true, onClick: async () => {
+            try {
+              const pack = await build();
+              saveFile(pack.name, pack.bytes, 'application/zip', '4WLA and delay log');
+            } catch (err) {
+              rc.reportError('lookahead:delay-export', err);
+              toast({ tone: 'bad', message: err.message, timeout: 10000 });
+            }
+          },
+        },
+      ].filter(Boolean),
+    });
+  }
+
+  /** The button that opens it — beside Export to Excel, in the read view and in Edit. */
+  function delayExportButton() {
+    return el('button', {
+      class: 'cx-btn mini la-export-delay',
+      type: 'button',
+      html: icon('download', { size: 12 }) + '<span>4WLA + delay log</span>',
+      title: `One .zip: the 4WLA in Excel, and the delay log of the last ${DELAY_DAYS} days as a PDF (a list and a calendar) and in Excel`,
+      onClick: () => openDelayExport(),
+    });
+  }
+
+  Object.defineProperty(__x, "DELAY_DAYS", { get: () => DELAY_DAYS, enumerable: true });
+  Object.defineProperty(__x, "delaySpan", { get: () => delaySpan, enumerable: true });
+  Object.defineProperty(__x, "delayEvents", { get: () => delayEvents, enumerable: true });
+  Object.defineProperty(__x, "delayLogFiles", { get: () => delayLogFiles, enumerable: true });
+  Object.defineProperty(__x, "buildDelayPack", { get: () => buildDelayPack, enumerable: true });
+  Object.defineProperty(__x, "openDelayExport", { get: () => openDelayExport, enumerable: true });
+  Object.defineProperty(__x, "delayExportButton", { get: () => delayExportButton, enumerable: true });
 };
 
 // ui/rc_la_editor.js
@@ -8584,6 +9749,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
   const { loadP6, openP6Picker, openP6Import, p6Words } = __req("ui/rc_la_p6.js");
   const { E, META, fmt, legendInForce, ensureWindow } = __req("ui/rc_la_editor_state.js");
   const { openExcelExport } = __req("ui/rc_la_export.js");
+  const { delayExportButton } = __req("ui/rc_la_delay.js");
 
   /* ══════════════════════════════════════════════════════════════════════════
      State
@@ -9222,6 +10388,7 @@ __mods["ui/rc_la_editor.js"] = function (__x, __req) {
         class: 'cx-btn mini', type: 'button', html: icon('download', { size: 12 }) + '<span>Export to Excel</span>',
         onClick: () => openExcelExport(),
       }),
+      delayExportButton(),
       iconButton('settings', 'More', (e) => moreMenu(e)),
     ].filter(Boolean));
 
@@ -13350,23 +14517,31 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
   /**
    * Look-ahead → Cancellations: every red run since the log's start.
    *
-   * Imports: util, dates, rc, io/lookahead, core/lookahead, icons, components,
-   *          rc_util, rc_la_state, rc_ingest.
+   * The list exports as it is drawn — Excel and a PDF of the same table, from
+   * `io/cancel_log.js`, which also reads each event the way this screen does
+   * (`runText()`, `calendarRows()`), so the screen and the files cannot differ.
+   *
+   * Imports: util, dates, rc, io/lookahead, io/cancel_log, io/la_xlsx,
+   *          core/lookahead, icons, components, rc_util, rc_la_state, rc_ingest.
    */
 
-  const { el, csvField } = __req("core/util.js");
+  const { el } = __req("core/util.js");
   const rc = __req("core/rc.js");
   const { applyLegend, isDark } = __req("io/lookahead.js");
   const { saveFile } = __req("io/exporters.js");
   const { readGrid, describeCodeCounts, isCancelMeaning } = __req("core/lookahead.js");
   const { rowsFrom } = __req("core/la_register.js");
-  const { cancellationWorkbook } = __req("io/la_xlsx.js");
+  const { cancellationWorkbook, cancellationListWorkbook } = __req("io/la_xlsx.js");
+  const { CANCEL_PARTIES, PARTY_TONE, OPEN_TONE, KIND_LABEL, runText, calendarRows, calendarCells, logLines, logStats, statChips, seenText, cancellationListPdf } = __req("io/cancel_log.js");
+
+
+
   const { monthLabel, weekdayLetter, isWeekend, mondayOf } = __req("core/la_edit.js");
   const { icon } = __req("ui/icons.js");
   const { selectInput, toast, badge, emptyState, checkbox, confirmDialog, chipStat } = __req("ui/components.js");
 
 
-  const { notifyChanged, dayLabel, todayISO, formModal, isoToMs, cancellationLog } = __req("ui/rc_util.js");
+  const { notifyChanged, dayLabel, todayISO, formModal, isoToMs, cancellationLog, authorNames } = __req("ui/rc_util.js");
 
 
   const { toISO, addDays } = __req("core/dates.js");
@@ -13378,15 +14553,10 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
      Cancellations
      ═══════════════════════════════════════════════════════════════════════ */
 
-  /** Whose cancellation it can be. The contract's three answers, as the schema checks them. */
-  const CANCEL_PARTIES = ['BART', 'Hitachi', 'Other'];
-  /**
-   * One colour per answer, the same in the list, the calendar and its Excel:
-   * BART red, Hitachi blue, another party amber — and purple while nobody has
-   * said, so an unanswered cancellation never reads as anybody's.
-   */
-  const PARTY_TONE = { BART: 'bad', Hitachi: 'info', Other: 'warn' };
-  const OPEN_TONE = 'pending';
+  /* Whose cancellation it can be (`CANCEL_PARTIES`), and one colour per answer
+     (`PARTY_TONE`), the same in the list, the calendar and their exports: BART
+     red, Hitachi blue, another party amber — and purple (`OPEN_TONE`) while
+     nobody has said, so an unanswered cancellation never reads as anybody's. */
 
   /** Whose an event is, as the class its colour hangs on: `by-bart`, `by-hitachi`, `by-other` or `open`. */
   function whose(e) {
@@ -13404,8 +14574,6 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
   let cancellationsKind = 'all';
   /** The log as a list, or as a calendar of the period like the look-ahead. */
   let cancellationsView = 'list';
-
-  const KIND_LABEL = { activity: 'Activity cancelled', support: 'BART support cancelled' };
 
   /**
    * Every red run the look-ahead has shown, since the log's start, with whose it
@@ -13497,23 +14665,9 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
       return;
     }
 
-    const tally = { BART: 0, Hitachi: 0, Other: 0 };
-    let open = 0;
-    let dayCount = 0;
-    for (const e of events) {
-      dayCount += e.days;
-      if (e.note) tally[e.note.party] = (tally[e.note.party] || 0) + 1;
-      else open++;
-    }
-    const resourceEvents = events.filter((e) => e.kind === 'support').length;
-    host.appendChild(el('div', { class: 'cx-chipstats', style: 'margin:0 0 12px' }, [
-      chipStat('Events', events.length, 'info'),
-      chipStat('Cancelled activities', events.length - resourceEvents, 'muted'),
-      chipStat('BART support', resourceEvents, resourceEvents ? 'warn' : 'muted'),
-      chipStat('Days', dayCount, 'muted'),
-      ...CANCEL_PARTIES.map((p) => chipStat(p, tally[p], tally[p] ? PARTY_TONE[p] : 'muted')),
-      chipStat('No reason yet', open, open ? OPEN_TONE : 'muted'),
-    ]));
+    // The counts, as the PDF of this list draws them too.
+    host.appendChild(el('div', { class: 'cx-chipstats', style: 'margin:0 0 12px' },
+      statChips(logStats(events)).map(([label, value, tone]) => chipStat(label, value, tone))));
 
     host.appendChild(el('div', { style: 'display:flex;gap:18px;flex-wrap:wrap' }, [
       checkbox({
@@ -13553,19 +14707,35 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
       return;
     }
 
-    /* The extract is what is on screen: the span above, and the "no reason yet"
-       narrowing when it is ticked. The file says which span in its name, because
-       a log that is quietly a fortnight of a quarter reads as the whole quarter. */
-    host.appendChild(el('div', { style: 'margin:8px 0 10px' }, [
+    /* The extract is what is on screen: the span above, the kind, and the "no
+       reason yet" narrowing when it is ticked — in Excel, or as a PDF drawn like
+       this table. The file says which span in its name and on its first line,
+       and the PDF says how the list was narrowed, because a log that is quietly
+       a fortnight of a quarter reads as the whole quarter. */
+    const narrowed = [
+      cancellationsKind === 'activity' ? 'cancelled activities only' : cancellationsKind === 'support' ? 'BART support only' : '',
+      cancellationsUnansweredOnly ? 'only the ones with no reason yet' : '',
+      cancellationsShowRemoved && removedCount ? `with the ${removedCount} removed from the log` : '',
+    ].filter(Boolean);
+    const extract = {
+      events, shown, narrowed,
+      span: to ? `from ${span}` : span,
+      name: `Cancellation log ${from} to ${to || todayISO()}`,
+    };
+    host.appendChild(el('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 10px' }, [
       el('button', {
-        class: 'cx-btn mini',
-        html: `${icon('download', { size: 12 })}<span>Export ${shown.length} to CSV</span>`,
-        onClick: () => saveFile(
-          `cancellations-${from}-to-${to || todayISO()}.csv`,
-          cancellationCsv(shown),
-          'text/csv',
-          'Cancellation log',
-        ),
+        class: 'cx-btn mini la-cancel-list-xlsx',
+        type: 'button',
+        html: `${icon('download', { size: 12 })}<span>Export ${shown.length} to Excel</span>`,
+        title: 'This list as an .xlsx: a row per cancellation, its dates as dates, whose it was in its colour',
+        onClick: () => exportList('xlsx', extract),
+      }),
+      el('button', {
+        class: 'cx-btn mini la-cancel-list-pdf',
+        type: 'button',
+        html: `${icon('download', { size: 12 })}<span>Export PDF</span>`,
+        title: 'This list as a PDF, drawn as it is here — the counts, then the table, on as many pages as it needs',
+        onClick: () => exportList('pdf', extract),
       }),
     ]));
     const rows = shown.map((e) => el('tr', {
@@ -13602,7 +14772,7 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
       el('td', {
         class: 'rc-hint',
         title: 'How many reads of the sheet showed any of these days red, and when it was first seen',
-        text: `${e.reads} read${e.reads === 1 ? '' : 's'}${e.firstSeen ? ` · first ${dayLabel(String(e.firstSeen).slice(0, 10))}` : ''}`,
+        text: seenText(e),
       }),
       el('td', {}, [e.note ? badge(e.note.party, PARTY_TONE[e.note.party] || 'neutral') : badge('No reason yet', OPEN_TONE)]),
       el('td', {}, [
@@ -13646,6 +14816,41 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
     host.appendChild(table(['', 'Activity', 'What', 'BART resources', 'Cancelled', 'Length', 'Seen', 'Responsible', 'Reason', ''], rows));
   }
 
+  /** The legend's own cancellation red, `RRGGBB` — what BART's cancelled days are filled with. */
+  function cancelRed(legendRows) {
+    return String(legendRows.find((l) => isCancelMeaning(l.meaning || ''))?.argb || 'FF0000').toUpperCase();
+  }
+
+  /**
+   * The list on screen, saved: in Excel — a clean table, the span and the counts
+   * above it — or as a PDF drawn the way the tab draws it. Who logged each
+   * reason comes from the roster, as the master export names them.
+   */
+  async function exportList(kind, { events, shown, span, narrowed, name }) {
+    try {
+      const [legendRows, people] = await Promise.all([
+        rc.listLegend().catch(() => []),
+        rc.listPeople({ includeInactive: true }).catch(() => []),
+      ]);
+      const lines = logLines(shown, { who: authorNames(people) });
+      const stats = logStats(events);
+      const listed = `${shown.length} cancellation${shown.length === 1 ? '' : 's'}`;
+      const subtitle = `${span[0].toUpperCase()}${span.slice(1)}  ·  ${narrowed.length ? `${listed}: ${narrowed.join(', ')}` : listed}`;
+      if (kind === 'xlsx') {
+        const bytes = cancellationListWorkbook({ lines, stats, title: 'Cancellation log', subtitle, red: cancelRed(legendRows) });
+        saveFile(`${name}.xlsx`, bytes, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'Cancellation log');
+        return;
+      }
+      const note = narrowed.length
+        ? `The counts are every cancellation ${span}; the list is narrowed to ${narrowed.join(', ')}.`
+        : `Every cancellation ${span}.`;
+      saveFile(`${name}.pdf`, cancellationListPdf(lines, { stats, note, subtitle }), 'application/pdf', 'Cancellation log');
+    } catch (err) {
+      rc.reportError('cancellations:export', err);
+      toast({ tone: 'bad', message: `The cancellation log could not be exported — ${err.message}`, timeout: 10000 });
+    }
+  }
+
   /**
    * Open the calendar on the one row a cancellation was logged against, in the
    * weeks it ran — not a filter typed for it. The log's label is the row's cells
@@ -13672,16 +14877,7 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
      The cancellations as a calendar
      ═══════════════════════════════════════════════════════════════════════ */
 
-  /** What one cancelled run says on the calendar and in its Excel cell. */
-  function runText(e) {
-    const what = e.kind === 'support'
-      ? `${describeCodeCounts(e.resources)} cancelled`
-      : describeCodeCounts(e.resources);
-    const why = e.note ? `${e.note.party}${e.note.reason ? `: ${e.note.reason}` : ''}` : 'No reason yet';
-    return [what, why].filter(Boolean).join('\n');
-  }
-
-  /** The same as nodes: only the struck-out codes are drawn through, never the reason. */
+  /** What one cancelled run says (`runText()`), as nodes: only the struck-out codes are drawn through, never the reason. */
   function runNodes(e) {
     const [what, ...why] = runText(e).split('\n');
     return [
@@ -13701,19 +14897,12 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
    */
   async function cancellationCalendar(events, from, to) {
     const wrap = el('div', { class: 'la-cancel-calendar' });
-    const legendRows = await rc.listLegend().catch(() => []);
-    const red = String(legendRows.find((l) => isCancelMeaning(l.meaning || ''))?.argb || 'FF0000').toUpperCase();
+    const red = cancelRed(await rc.listLegend().catch(() => []));
     const last = to || events.reduce((m, e) => (e.end > m ? e.end : m), from);
     const days = [];
     for (let d = from; d <= last && days.length < 400; d = toISO(addDays(isoToMs(d), 1))) days.push(d);
 
-    const byActivity = new Map();
-    for (const e of events) {
-      const activity = e.laRowId || e.key;
-      if (!byActivity.has(activity)) byActivity.set(activity, { label: e.label, location: e.location, events: [] });
-      byActivity.get(activity).events.push(e);
-    }
-    const rows = [...byActivity.values()].sort((a, b) => a.label.localeCompare(b.label) || a.location.localeCompare(b.location));
+    const rows = calendarRows(events);
 
     const span = `${dayLabel(from)} to ${dayLabel(last)}`;
     wrap.appendChild(el('div', { style: 'display:flex;gap:8px;align-items:center;margin:8px 0 10px;flex-wrap:wrap' }, [
@@ -13728,10 +14917,7 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
             red,
             title: 'Cancellation log',
             subtitle: `${span} · ${events.length} cancellation(s)`,
-            rows: rows.map((r) => ({
-              ...r,
-              events: r.events.map((e) => ({ start: e.start, end: e.end, kind: e.kind, party: e.note?.party || null, text: runText(e) })),
-            })),
+            rows: calendarCells(events),
           });
           saveFile(`cancellations ${from} to ${last}.xlsx`, bytes,
             'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'Cancellation calendar');
@@ -13980,20 +15166,6 @@ __mods["ui/rc_la_cancellations.js"] = function (__x, __req) {
       },
     });
   }
-
-  function cancellationCsv(events) {
-    const q = (v) => csvField(v, { quote: true });
-    const lines = [['activity', 'location', 'kind', 'bart_resources', 'start', 'end', 'days', 'reads', 'first_seen', 'last_seen', 'responsible', 'reason', 'recorded_at'].join(',')];
-    for (const e of events) {
-      lines.push([
-        e.label, e.location, e.kind === 'support' ? 'bart resource' : 'day', describeCodeCounts(e.resources),
-        e.start, e.end, e.days, e.reads,
-        e.firstSeen || '', e.lastSeen || '', e.note?.party || '', e.note?.reason || '', e.note?.created_at || '',
-      ].map(q).join(','));
-    }
-    return lines.join('\n') + '\n';
-  }
-
 
   Object.defineProperty(__x, "renderCancellations", { get: () => renderCancellations, enumerable: true });
 };
@@ -15041,6 +16213,7 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
   const { checkNowButton, lookaheadSource, EDITOR_SOURCE, writtenView } = __req("ui/rc_ingest.js");
   const { renderEditor, flushEditor } = __req("ui/rc_la_editor.js");
   const { openExcelExport } = __req("ui/rc_la_export.js");
+  const { delayExportButton } = __req("ui/rc_la_delay.js");
   const { renderLegend } = __req("ui/rc_la_legend.js");
   const { renderChanges, renderSnapshots } = __req("ui/rc_la_changes.js");
   const { renderCancellations } = __req("ui/rc_la_cancellations.js");
@@ -15461,6 +16634,9 @@ __mods["ui/rc_lookahead.js"] = function (__x, __req) {
         title: 'The look-ahead as an .xlsx in the 4WLA layout — the same export as in Edit.',
         onClick: () => openExcelExport(),
       }) : null,
+      /* The same 4WLA with the delay log of the days just gone, as one .zip —
+         an administrator's, like the cancellation log it is read from. */
+      written && rc.isAdmin() ? delayExportButton() : null,
     ].filter(Boolean)));
     host.appendChild(body);
     await draw();

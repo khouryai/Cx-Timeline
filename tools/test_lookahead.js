@@ -1577,6 +1577,110 @@ console.log('\n"Everything" is one calendar, however many sources it is drawn fr
   check('and one source is drawn as it is', cls.mergeViews([{ view: now }]) === now);
 }
 
+console.log('\nThe cancellation log on paper: the list as the tab draws it, and the delay log');
+{
+  const cl = await import(path.join(ROOT, 'src/io/cancel_log.js'));
+  const { textWidth } = await import(path.join(ROOT, 'src/io/pdf.js'));
+  const ev = (o) => ({
+    key: o.label || 'IXL night mode testing', laRowId: null, kind: 'activity', codes: '', label: 'IXL night mode testing',
+    location: 'W34', start: '2026-09-15', end: '2026-09-16', days: 2, reads: 3, firstSeen: '2026-09-10T09:00:00Z',
+    resources: new Map([['X', 2], ['WIT', 1]]), note: null, history: [], ...o,
+  });
+  const long = 'Possession withdrawn by BART at short notice because the adjacent track was needed for a ballast train, '
+    + 'and the crew stood down for the night with the witness already on site';
+  const events = [
+    ev({ note: { party: 'BART', reason: long, author: 'u1', created_at: '2026-09-15T08:00:00Z' }, history: [{}, {}] }),
+    ev({ label: 'ATS site test', key: 'ats', location: 'Daly City', start: '2026-09-18', end: '2026-09-18', days: 1, note: { party: 'Hitachi', reason: 'Crew reallocated to Y10' } }),
+    ev({ label: 'Cable pull', key: 'cable', kind: 'support', codes: 'WIT', start: '2026-09-21', end: '2026-09-26', days: 6, resources: new Map([['WIT', 6]]) }),
+    ev({ label: 'Signal test', key: 'signal', start: '2026-09-21', end: '2026-09-21', days: 1, note: { party: 'Other', reason: 'Weather' }, dismissed: true }),
+    ...Array.from({ length: 40 }, (_, i) => ev({ label: `Filler activity ${String(i).padStart(2, '0')}`, key: `f${i}`, start: '2026-09-19', end: '2026-09-19', days: 1 })),
+  ];
+  const lines = cl.logLines(events, { who: (id) => (id === 'u1' ? 'Dan' : '') });
+  const stats = cl.logStats(events);
+  check('the counts are the tab\'s: events, kinds, days, whose, and no reason yet',
+    stats.events === 44 && stats.activities === 43 && stats.support === 1 && stats.days === 50
+      && stats.BART === 1 && stats.Hitachi === 1 && stats.Other === 1 && stats.open === 41, JSON.stringify(stats));
+  check('a line says who logged the reason, and how many times it was corrected',
+    lines[0].loggedBy === 'Dan' && lines[0].corrections === 1 && lines[0].responsible === 'BART' && lines[2].responsible === 'No reason yet');
+
+  const texts = (scene) => scene.items.filter((i) => i.type === 'text');
+  const offEdge = (scene) => scene.items.filter((i) => {
+    const slack = 0.6;
+    if (i.type === 'rect') return i.x < -slack || i.y < -slack || i.x + i.w > scene.width + slack || i.y + i.h > scene.height + slack;
+    if (i.type === 'line') return Math.max(i.x1, i.x2) > scene.width + slack || Math.max(i.y1, i.y2) > scene.height + slack;
+    if (i.type === 'text') {
+      const w = textWidth(i.text, i.size, i.family === 'mono' ? 'F4' : i.weight >= 600 ? 'F2' : 'F1');
+      const left = i.anchor === 'middle' ? i.x - w / 2 : i.anchor === 'end' ? i.x - w : i.x;
+      return left < -slack || left + w > scene.width + 1 || i.y > scene.height + slack;
+    }
+    return false;
+  });
+
+  const pages = cl.listScenes(lines, { stats, note: 'Everything since 1 Sep 26.', page: { pageSize: 'a4', orientation: 'landscape', title: 'x' } });
+  check('a long list runs onto more pages rather than shrinking', pages.length >= 3, `${pages.length} pages`);
+  check('every page carries the column heads in the tab\'s mono capitals, the counts only the first',
+    pages.every((p) => texts(p).filter((t) => t.text === 'RESPONSIBLE' && t.family === 'mono').length === 1)
+      && texts(pages[0]).some((t) => t.text === 'NO REASON YET') && !texts(pages[1]).some((t) => t.text === 'NO REASON YET'));
+  const labels = pages.flatMap((p) => texts(p).map((t) => t.text)).filter((t) => /^Filler activity/.test(t));
+  check('every cancellation is listed once, none split across a page', labels.length === 40 && new Set(labels).size === 40);
+  check('nothing is drawn past the edge of any page', pages.every((p) => !offEdge(p).length),
+    JSON.stringify(pages.flatMap(offEdge).slice(0, 2)));
+  const reasonLines = texts(pages[0]).filter((t) => long.includes(t.text) && t.text.length > 8);
+  check('a long reason wraps and its row grows, never cut short',
+    reasonLines.length >= 2 && reasonLines.map((t) => t.text).join(' ') === long, `${reasonLines.length} lines`);
+  const struck = texts(pages[0]).find((t) => t.text === '6 WIT');
+  check('a BART resource struck out of work that went ahead is drawn struck through, as on screen',
+    Boolean(struck) && pages[0].items.some((i) => i.type === 'line' && Math.abs(i.x1 - struck.x) < 0.01 && i.y1 < struck.y && i.y1 > struck.y - struck.size));
+  check('one square per cancelled day, outlined for a resource, filled for a day',
+    pages[0].items.filter((i) => i.type === 'rect' && i.w < 5 && i.fill === 'none').length === 6);
+  check('one removed from the log is listed, set aside — dimmed, and saying so',
+    texts(pages[0]).some((t) => t.text === 'Signal test' && t.opacity < 1) && texts(pages[0]).some((t) => t.text === 'Removed from the log'));
+  check('whose it was is a badge in words, not a colour alone',
+    ['BART', 'Hitachi', 'No reason yet'].every((w) => texts(pages[0]).some((t) => t.text === w)));
+
+  const empty = cl.listScenes([], { stats: cl.logStats([]), empty: 'Nothing cancelled from 14 Sep to 23 Sep.' });
+  check('an empty list is one page that says so', empty.length === 1 && texts(empty[0]).some((t) => /^Nothing cancelled from/.test(t.text)));
+
+  const days = cl.spanDays('2026-09-14', '2026-09-23');
+  check('the span is every day, both ends included', days.length === 10 && days[0] === '2026-09-14' && days[9] === '2026-09-23');
+  const rows = cl.calendarCells(events);
+  const cal = cl.calendarScenes(rows, { days, red: 'FF0000', today: '2026-09-23', page: { pageSize: 'a4', orientation: 'landscape', title: 'x' } });
+  check('the calendar keeps one row per activity, onto more pages as it needs',
+    cal.length >= 2 && cal.flatMap((p) => texts(p).map((t) => t.text)).filter((t) => /^Filler activity/.test(t)).length === 40);
+  check('nothing is drawn past the edge of any calendar page', cal.every((p) => !offEdge(p).length),
+    JSON.stringify(cal.flatMap(offEdge).slice(0, 2)));
+  const num = (d) => texts(cal[0]).find((t) => t.text === String(d) && t.anchor === 'middle' && t.y < 30);
+  const dayW = num(16).x - num(15).x;
+  const all = cal.flatMap((p) => p.items);
+  const ixl = all.find((i) => i.type === 'rect' && i.fill === '#FF0000' && i.h > 10);
+  check('a run is one cell across its days, in the legend\'s red when it was BART\'s',
+    Boolean(ixl) && Math.abs(ixl.w - (2 * dayW - 2)) < 0.01 && Math.abs(ixl.x - 1 - (num(15).x - dayW / 2)) < 0.01,
+    JSON.stringify({ ixl, dayW }));
+  // Cable pull runs 21 to 26 September; the window ends on the 23rd.
+  check('a run past the last day is drawn up to it, not off the page',
+    all.some((i) => i.type === 'line' && i.dash && i.y1 === i.y2 && Math.abs(Math.abs(i.x2 - i.x1) - (3 * dayW - 2)) < 0.01)
+      && all.some((i) => i.type === 'text' && /^6 WIT/.test(i.text)));
+  check('no reason yet is a dashed edge, so it never reads as anybody\'s',
+    cal[0].items.some((i) => i.type === 'line' && i.dash && i.stroke === '#7030A0'));
+  check('today is marked, and the key names every colour in words',
+    texts(cal[0]).some((t) => t.text === 'Today' && t.fill === '#e60012')
+      && ['BART', 'Hitachi', 'Other', 'No reason yet'].every((w) => texts(cal[0]).some((t) => t.text === w)));
+
+  const blob = cl.delayLogPdf({ events, days, red: 'FF0000', today: '2026-09-23', who: () => 'Dan', title: 'Delay log' });
+  const text = new TextDecoder('latin1').decode(new Uint8Array(await blob.arrayBuffer()));
+  const pageCount = (text.match(/\/Type \/Page[^s]/g) || []).length;
+  check('the delay log PDF is the list, then the calendar, every page numbered',
+    text.startsWith('%PDF-') && pageCount === pages.length + cal.length
+      && /As a list\) Tj/.test(text) && /As a calendar\) Tj/.test(text) && text.includes(`(A4 landscape  \xb7  100%  \xb7  Page ${pageCount} of ${pageCount}) Tj`),
+    `${pageCount} pages`);
+  check('on A4 landscape, at full size', /\/MediaBox \[0 0 841\.89 595\.28\]/.test(text) && !/  \xb7  \d\d%/.test(text));
+  check('a middle dot prints as itself, not a minus — "2 X · 1 WIT"', text.includes('(2 X \xb7 1 WIT) Tj'));
+  const listOnly = cl.cancellationListPdf(lines.slice(0, 3), { stats, title: 'Cancellation log', subtitle: 'Since 1 Sep 26' });
+  const listText = new TextDecoder('latin1').decode(new Uint8Array(await listOnly.arrayBuffer()));
+  check('the tab\'s list PDF is one page for a short list, titled and dated',
+    (listText.match(/\/Type \/Page[^s]/g) || []).length === 1 && listText.includes('(Cancellation log) Tj') && listText.includes('(Since 1 Sep 26) Tj'));
+}
+
 console.log(`\n${passed}/${passed + failures.length} checks passed`);
 if (failures.length) {
   console.log('\nFailed:');

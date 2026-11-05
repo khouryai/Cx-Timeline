@@ -1,24 +1,32 @@
 /**
  * Look-ahead → Cancellations: every red run since the log's start.
  *
- * Imports: util, dates, rc, io/lookahead, core/lookahead, icons, components,
- *          rc_util, rc_la_state, rc_ingest.
+ * The list exports as it is drawn — Excel and a PDF of the same table, from
+ * `io/cancel_log.js`, which also reads each event the way this screen does
+ * (`runText()`, `calendarRows()`), so the screen and the files cannot differ.
+ *
+ * Imports: util, dates, rc, io/lookahead, io/cancel_log, io/la_xlsx,
+ *          core/lookahead, icons, components, rc_util, rc_la_state, rc_ingest.
  */
 
-import { el, csvField } from '../core/util.js';
+import { el } from '../core/util.js';
 import * as rc from '../core/rc.js';
 import { applyLegend, isDark } from '../io/lookahead.js';
 import { saveFile } from '../io/exporters.js';
 import { readGrid, describeCodeCounts, isCancelMeaning } from '../core/lookahead.js';
 import { rowsFrom } from '../core/la_register.js';
-import { cancellationWorkbook } from '../io/la_xlsx.js';
+import { cancellationWorkbook, cancellationListWorkbook } from '../io/la_xlsx.js';
+import {
+  CANCEL_PARTIES, PARTY_TONE, OPEN_TONE, KIND_LABEL, runText, calendarRows, calendarCells,
+  logLines, logStats, statChips, seenText, cancellationListPdf,
+} from '../io/cancel_log.js';
 import { monthLabel, weekdayLetter, isWeekend, mondayOf } from '../core/la_edit.js';
 import { icon } from './icons.js';
 import {
   selectInput, toast, badge, emptyState, checkbox, confirmDialog, chipStat,
 } from './components.js';
 import {
-  notifyChanged, dayLabel, todayISO, formModal, isoToMs, cancellationLog,
+  notifyChanged, dayLabel, todayISO, formModal, isoToMs, cancellationLog, authorNames,
 } from './rc_util.js';
 import { toISO, addDays } from '../core/dates.js';
 
@@ -29,15 +37,10 @@ import { checkNowButton } from './rc_ingest.js';
    Cancellations
    ═══════════════════════════════════════════════════════════════════════ */
 
-/** Whose cancellation it can be. The contract's three answers, as the schema checks them. */
-const CANCEL_PARTIES = ['BART', 'Hitachi', 'Other'];
-/**
- * One colour per answer, the same in the list, the calendar and its Excel:
- * BART red, Hitachi blue, another party amber — and purple while nobody has
- * said, so an unanswered cancellation never reads as anybody's.
- */
-const PARTY_TONE = { BART: 'bad', Hitachi: 'info', Other: 'warn' };
-const OPEN_TONE = 'pending';
+/* Whose cancellation it can be (`CANCEL_PARTIES`), and one colour per answer
+   (`PARTY_TONE`), the same in the list, the calendar and their exports: BART
+   red, Hitachi blue, another party amber — and purple (`OPEN_TONE`) while
+   nobody has said, so an unanswered cancellation never reads as anybody's. */
 
 /** Whose an event is, as the class its colour hangs on: `by-bart`, `by-hitachi`, `by-other` or `open`. */
 function whose(e) {
@@ -55,8 +58,6 @@ let cancellationsShowRemoved = false;
 let cancellationsKind = 'all';
 /** The log as a list, or as a calendar of the period like the look-ahead. */
 let cancellationsView = 'list';
-
-const KIND_LABEL = { activity: 'Activity cancelled', support: 'BART support cancelled' };
 
 /**
  * Every red run the look-ahead has shown, since the log's start, with whose it
@@ -148,23 +149,9 @@ export async function renderCancellations(host) {
     return;
   }
 
-  const tally = { BART: 0, Hitachi: 0, Other: 0 };
-  let open = 0;
-  let dayCount = 0;
-  for (const e of events) {
-    dayCount += e.days;
-    if (e.note) tally[e.note.party] = (tally[e.note.party] || 0) + 1;
-    else open++;
-  }
-  const resourceEvents = events.filter((e) => e.kind === 'support').length;
-  host.appendChild(el('div', { class: 'cx-chipstats', style: 'margin:0 0 12px' }, [
-    chipStat('Events', events.length, 'info'),
-    chipStat('Cancelled activities', events.length - resourceEvents, 'muted'),
-    chipStat('BART support', resourceEvents, resourceEvents ? 'warn' : 'muted'),
-    chipStat('Days', dayCount, 'muted'),
-    ...CANCEL_PARTIES.map((p) => chipStat(p, tally[p], tally[p] ? PARTY_TONE[p] : 'muted')),
-    chipStat('No reason yet', open, open ? OPEN_TONE : 'muted'),
-  ]));
+  // The counts, as the PDF of this list draws them too.
+  host.appendChild(el('div', { class: 'cx-chipstats', style: 'margin:0 0 12px' },
+    statChips(logStats(events)).map(([label, value, tone]) => chipStat(label, value, tone))));
 
   host.appendChild(el('div', { style: 'display:flex;gap:18px;flex-wrap:wrap' }, [
     checkbox({
@@ -204,19 +191,35 @@ export async function renderCancellations(host) {
     return;
   }
 
-  /* The extract is what is on screen: the span above, and the "no reason yet"
-     narrowing when it is ticked. The file says which span in its name, because
-     a log that is quietly a fortnight of a quarter reads as the whole quarter. */
-  host.appendChild(el('div', { style: 'margin:8px 0 10px' }, [
+  /* The extract is what is on screen: the span above, the kind, and the "no
+     reason yet" narrowing when it is ticked — in Excel, or as a PDF drawn like
+     this table. The file says which span in its name and on its first line,
+     and the PDF says how the list was narrowed, because a log that is quietly
+     a fortnight of a quarter reads as the whole quarter. */
+  const narrowed = [
+    cancellationsKind === 'activity' ? 'cancelled activities only' : cancellationsKind === 'support' ? 'BART support only' : '',
+    cancellationsUnansweredOnly ? 'only the ones with no reason yet' : '',
+    cancellationsShowRemoved && removedCount ? `with the ${removedCount} removed from the log` : '',
+  ].filter(Boolean);
+  const extract = {
+    events, shown, narrowed,
+    span: to ? `from ${span}` : span,
+    name: `Cancellation log ${from} to ${to || todayISO()}`,
+  };
+  host.appendChild(el('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 10px' }, [
     el('button', {
-      class: 'cx-btn mini',
-      html: `${icon('download', { size: 12 })}<span>Export ${shown.length} to CSV</span>`,
-      onClick: () => saveFile(
-        `cancellations-${from}-to-${to || todayISO()}.csv`,
-        cancellationCsv(shown),
-        'text/csv',
-        'Cancellation log',
-      ),
+      class: 'cx-btn mini la-cancel-list-xlsx',
+      type: 'button',
+      html: `${icon('download', { size: 12 })}<span>Export ${shown.length} to Excel</span>`,
+      title: 'This list as an .xlsx: a row per cancellation, its dates as dates, whose it was in its colour',
+      onClick: () => exportList('xlsx', extract),
+    }),
+    el('button', {
+      class: 'cx-btn mini la-cancel-list-pdf',
+      type: 'button',
+      html: `${icon('download', { size: 12 })}<span>Export PDF</span>`,
+      title: 'This list as a PDF, drawn as it is here — the counts, then the table, on as many pages as it needs',
+      onClick: () => exportList('pdf', extract),
     }),
   ]));
   const rows = shown.map((e) => el('tr', {
@@ -253,7 +256,7 @@ export async function renderCancellations(host) {
     el('td', {
       class: 'rc-hint',
       title: 'How many reads of the sheet showed any of these days red, and when it was first seen',
-      text: `${e.reads} read${e.reads === 1 ? '' : 's'}${e.firstSeen ? ` · first ${dayLabel(String(e.firstSeen).slice(0, 10))}` : ''}`,
+      text: seenText(e),
     }),
     el('td', {}, [e.note ? badge(e.note.party, PARTY_TONE[e.note.party] || 'neutral') : badge('No reason yet', OPEN_TONE)]),
     el('td', {}, [
@@ -297,6 +300,41 @@ export async function renderCancellations(host) {
   host.appendChild(table(['', 'Activity', 'What', 'BART resources', 'Cancelled', 'Length', 'Seen', 'Responsible', 'Reason', ''], rows));
 }
 
+/** The legend's own cancellation red, `RRGGBB` — what BART's cancelled days are filled with. */
+function cancelRed(legendRows) {
+  return String(legendRows.find((l) => isCancelMeaning(l.meaning || ''))?.argb || 'FF0000').toUpperCase();
+}
+
+/**
+ * The list on screen, saved: in Excel — a clean table, the span and the counts
+ * above it — or as a PDF drawn the way the tab draws it. Who logged each
+ * reason comes from the roster, as the master export names them.
+ */
+async function exportList(kind, { events, shown, span, narrowed, name }) {
+  try {
+    const [legendRows, people] = await Promise.all([
+      rc.listLegend().catch(() => []),
+      rc.listPeople({ includeInactive: true }).catch(() => []),
+    ]);
+    const lines = logLines(shown, { who: authorNames(people) });
+    const stats = logStats(events);
+    const listed = `${shown.length} cancellation${shown.length === 1 ? '' : 's'}`;
+    const subtitle = `${span[0].toUpperCase()}${span.slice(1)}  ·  ${narrowed.length ? `${listed}: ${narrowed.join(', ')}` : listed}`;
+    if (kind === 'xlsx') {
+      const bytes = cancellationListWorkbook({ lines, stats, title: 'Cancellation log', subtitle, red: cancelRed(legendRows) });
+      saveFile(`${name}.xlsx`, bytes, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'Cancellation log');
+      return;
+    }
+    const note = narrowed.length
+      ? `The counts are every cancellation ${span}; the list is narrowed to ${narrowed.join(', ')}.`
+      : `Every cancellation ${span}.`;
+    saveFile(`${name}.pdf`, cancellationListPdf(lines, { stats, note, subtitle }), 'application/pdf', 'Cancellation log');
+  } catch (err) {
+    rc.reportError('cancellations:export', err);
+    toast({ tone: 'bad', message: `The cancellation log could not be exported — ${err.message}`, timeout: 10000 });
+  }
+}
+
 /**
  * Open the calendar on the one row a cancellation was logged against, in the
  * weeks it ran — not a filter typed for it. The log's label is the row's cells
@@ -323,16 +361,7 @@ function showCells(e) {
    The cancellations as a calendar
    ═══════════════════════════════════════════════════════════════════════ */
 
-/** What one cancelled run says on the calendar and in its Excel cell. */
-function runText(e) {
-  const what = e.kind === 'support'
-    ? `${describeCodeCounts(e.resources)} cancelled`
-    : describeCodeCounts(e.resources);
-  const why = e.note ? `${e.note.party}${e.note.reason ? `: ${e.note.reason}` : ''}` : 'No reason yet';
-  return [what, why].filter(Boolean).join('\n');
-}
-
-/** The same as nodes: only the struck-out codes are drawn through, never the reason. */
+/** What one cancelled run says (`runText()`), as nodes: only the struck-out codes are drawn through, never the reason. */
 function runNodes(e) {
   const [what, ...why] = runText(e).split('\n');
   return [
@@ -352,19 +381,12 @@ function runNodes(e) {
  */
 async function cancellationCalendar(events, from, to) {
   const wrap = el('div', { class: 'la-cancel-calendar' });
-  const legendRows = await rc.listLegend().catch(() => []);
-  const red = String(legendRows.find((l) => isCancelMeaning(l.meaning || ''))?.argb || 'FF0000').toUpperCase();
+  const red = cancelRed(await rc.listLegend().catch(() => []));
   const last = to || events.reduce((m, e) => (e.end > m ? e.end : m), from);
   const days = [];
   for (let d = from; d <= last && days.length < 400; d = toISO(addDays(isoToMs(d), 1))) days.push(d);
 
-  const byActivity = new Map();
-  for (const e of events) {
-    const activity = e.laRowId || e.key;
-    if (!byActivity.has(activity)) byActivity.set(activity, { label: e.label, location: e.location, events: [] });
-    byActivity.get(activity).events.push(e);
-  }
-  const rows = [...byActivity.values()].sort((a, b) => a.label.localeCompare(b.label) || a.location.localeCompare(b.location));
+  const rows = calendarRows(events);
 
   const span = `${dayLabel(from)} to ${dayLabel(last)}`;
   wrap.appendChild(el('div', { style: 'display:flex;gap:8px;align-items:center;margin:8px 0 10px;flex-wrap:wrap' }, [
@@ -379,10 +401,7 @@ async function cancellationCalendar(events, from, to) {
           red,
           title: 'Cancellation log',
           subtitle: `${span} · ${events.length} cancellation(s)`,
-          rows: rows.map((r) => ({
-            ...r,
-            events: r.events.map((e) => ({ start: e.start, end: e.end, kind: e.kind, party: e.note?.party || null, text: runText(e) })),
-          })),
+          rows: calendarCells(events),
         });
         saveFile(`cancellations ${from} to ${last}.xlsx`, bytes,
           'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'Cancellation calendar');
@@ -631,17 +650,3 @@ function recordCancellation(event) {
     },
   });
 }
-
-function cancellationCsv(events) {
-  const q = (v) => csvField(v, { quote: true });
-  const lines = [['activity', 'location', 'kind', 'bart_resources', 'start', 'end', 'days', 'reads', 'first_seen', 'last_seen', 'responsible', 'reason', 'recorded_at'].join(',')];
-  for (const e of events) {
-    lines.push([
-      e.label, e.location, e.kind === 'support' ? 'bart resource' : 'day', describeCodeCounts(e.resources),
-      e.start, e.end, e.days, e.reads,
-      e.firstSeen || '', e.lastSeen || '', e.note?.party || '', e.note?.reason || '', e.note?.created_at || '',
-    ].map(q).join(','));
-  }
-  return lines.join('\n') + '\n';
-}
-

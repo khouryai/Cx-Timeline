@@ -118,6 +118,8 @@ ui/workspace · ui/calendar_loader         the calendar, loaded on first use:
           · ui/rc_table       → ui/rc_util   (calendar.bundle.js)
 io/scene → io/svg · io/pdf · io/inflate → io/exporters · io/importers
 io/rc_pdf → io/pdf · io/lookahead         the calendar drawn for print — no DOM
+io/cancel_log → io/pdf · io/lookahead     the cancellation log on paper: the tab's list,
+                                          its calendar, the delay log — no DOM
 core/la_edit → core/lookahead             the look-ahead editor's model — no DOM
 core/la_register → core/lookahead         readings stored as rows, and compared —
                                           the calendar's alone (calendar.bundle.js)
@@ -216,6 +218,8 @@ alternative shipped once and went wrong.
 - A BART resource can be cancelled without the day: "X.~WIT" strikes the witness out, the editor asks *Cancel and log* or *Just remove*, and `rc_cancelled_support_days` puts it in the log beside the days cancelled outright. [→](docs/ARCHITECTURE.md#a-bart-resource-can-be-cancelled-without-the-day-and-both-are-in-the-log)
 - The cancellation log is what the look-ahead says now (the newest reading covering each date), lists only BART's resources, and draws as a calendar exportable to Excel, coloured by whose it was (BART red, Hitachi blue, Other amber, no reason yet purple); "Show cells" pins the calendar to that row and its weeks (`la.calendarRow`), never a typed filter. [→](docs/ARCHITECTURE.md#the-cancellation-log-is-what-the-look-ahead-says-now-and-barts)
 - A wrong cancellation is removed from the log by a `dismissed` note, never deleted, and can be put back; a stored "Resource" label is never a cancellation. [→](docs/ARCHITECTURE.md#a-cancellation-can-be-removed-from-the-log-and-put-back)
+- The cancellation log's list exports as it is drawn — to Excel as one clean table (`cancellationListWorkbook()`) and as a PDF of the tab's table (`cancellationListPdf()`), never a CSV; the list, the counts and the calendar's cells are read once, in `io/cancel_log.js` (`logLines()`, `logStats()`, `runText()`, `calendarRows()`), for the screen and every file. [→](docs/ARCHITECTURE.md#the-cancellation-log-exports-as-it-is-drawn)
+- "4WLA + delay log" is one .zip (`ui/rc_la_delay.js`): Export to Excel's own 4WLA (`lookaheadChoices()`, `lookaheadBook()`), and the cancellation log of the last 10 days up to and including today as a PDF (the list, then a calendar) and a workbook (the list sheet, then the calendar sheet) — an event starting in the span, kept whole, none removed from the log. [→](docs/ARCHITECTURE.md#the-4wla-goes-out-with-the-delay-log-in-one-zip)
 - Today is a column, not a hairline. [→](docs/ARCHITECTURE.md#today-is-a-column-not-a-hairline)
 - The workbook is the assumption, so only a hand-typed day is flagged. [→](docs/ARCHITECTURE.md#the-workbook-is-the-assumption-so-only-a-hand-typed-day-is-flagged)
 - Nothing is emailed from the application, and that is structural. [→](docs/ARCHITECTURE.md#nothing-is-emailed-from-the-application-and-that-is-structural)
@@ -333,7 +337,9 @@ alternative shipped once and went wrong.
   parsed view and hand them to `fitToPdf()`. No DOM in that module, which is
   what lets `tools/test_lookahead.js` assert the geometry — that nothing is
   drawn past the edge, that a long description grows its row — without a
-  browser. Hand the bytes to `saveFile()` like everything else.
+  browser. Hand the bytes to `saveFile()` like everything else. A printout
+  that runs to several pages lays each page out at full size against
+  `contentBox()` and hands them to `fitPagesToPdf()`, as `io/cancel_log.js` does.
 - **A new export format**: consume the scene from `io/scene.js` rather than
   re-walking the document — that is what keeps every export agreeing with
   every other, and hand the bytes to `saveFile()` so the download announces
@@ -386,15 +392,15 @@ node tools/smoke.js --shot out.png             # …and eyeball the result
 |---|---|---|
 | `test_kit.js` | 24 | the desktop shell and its update kit: the channel and the workflow that writes it, the window's policy, the kit whole and saying which installer it needs, every command the application calls registered in Rust, and that nothing makes a network request |
 | `test_rc_db.js` | 90 | the calendar's database over a folder in memory: queries, views and functions, all-or-nothing writes, another computer's save refused rather than overwritten, the pen, and a backup imported |
-| `test_lookahead.js` | 266 | the parser, the rows it derives, the change events, only-my-rows, one activity whole, and the printed calendar's geometry, no browser |
+| `test_lookahead.js` | 289 | the parser, the rows it derives, the change events, only-my-rows, one activity whole, the printed calendar's geometry, and the cancellation log on paper — the list's pages and the delay log's calendar — no browser |
 | `test_folder_rules.js` | 46 | the folder's names, digest and pen rules, in Node |
 | `test_tawr.js` | 138 | TAWRs read off a look-ahead week — grouping, hours, support, flags, defaults, regenerating — and BART's form filled and read back in both PDF shapes |
-| `test_la_edit.js` | 230 | the look-ahead editor's model, undo, support codes, the published grid, cell history, who changed what, staffing clashes, and the Excel export read back, P6 extracts read, searched and compared, and the master export's workbook and schedule |
+| `test_la_edit.js` | 241 | the look-ahead editor's model, undo, support codes, the published grid, cell history, who changed what, staffing clashes, and the Excel export read back, P6 extracts read, searched and compared, the master export's workbook and schedule, and the cancellation list and delay log workbooks |
 | `smoke.js` | 331 | the application, local mode — a tall plan drawn by the rows in view, less motion and the System theme, files from elsewhere (imports, notes, CSV), and dates away from Greenwich — **any console error fails the run** |
-| `smoke_calendar.js` | 457 | the resource calendar over a fake folder (`tools/lib/rc_folder.js`): the door, importing the old calendar and starting empty, the look-ahead register, the cancellation log, PTO, the lists, two computers and the pen, the look-ahead grid and editor (`smoke_la_editor.js`), TAWRs (`smoke_tawr.js`), P6 activities linked to rows (`smoke_la_p6.js`), the master export and its schedule (`smoke_master_export.js`), a tablet, and that nothing is sent anywhere |
+| `smoke_calendar.js` | 481 | the resource calendar over a fake folder (`tools/lib/rc_folder.js`): the door, importing the old calendar and starting empty, the look-ahead register, the cancellation log, PTO, the lists, two computers and the pen, the look-ahead grid and editor (`smoke_la_editor.js`), TAWRs (`smoke_tawr.js`), P6 activities linked to rows (`smoke_la_p6.js`), the master export and its schedule (`smoke_master_export.js`), the 4WLA with the delay log as a .zip and the cancellation list to Excel and PDF (`smoke_delay_export.js`), a tablet, and that nothing is sent anywhere |
 | `smoke_folder.js` | 90 | the shared folder, in a browser |
 | `smoke_desktop.js` | 65 | the desktop shell, its updates — and a kit needing a newer installer refused — and the calendar written into the folder through the shell |
-| `test_xlsx_compat.js` | 18 | the Excel export opened, re-saved and printed by LibreOffice Calc, and the master export's sheets read out by it (skips where Calc is absent; the `xlsx` CI job installs it) |
+| `test_xlsx_compat.js` | 22 | the Excel export opened, re-saved and printed by LibreOffice Calc, and the master export's and the delay log's sheets read out by it (skips where Calc is absent; the `xlsx` CI job installs it) |
 
 **The suites run as though it were Wednesday 23 September 2026, 14:00 UTC**
 (`tools/lib/clock.js` shifts `Date` in Node and in every page). Build fixtures

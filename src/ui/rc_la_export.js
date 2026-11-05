@@ -31,7 +31,7 @@ import { E, fmt, legendInForce, ensureWindow } from './rc_la_editor_state.js';
  * read afresh, so the calendar's read view offers the identical workbook
  * without opening the editor, to anybody who can see the look-ahead.
  */
-async function exportSource() {
+export async function exportSource() {
   if (E.model) {
     return { model: E.model, legend: E.legend, codes: E.codes, title: E.title, weeks: E.weeks, ensure: ensureWindow };
   }
@@ -98,35 +98,33 @@ export async function lookaheadFileNow({ from = null, to = null } = {}) {
 // 4WLA_Latest.xlsx on a schedule is built here; that module files it.
 provide4wla({ xlsx: () => lookaheadFileNow() });
 
-/** The 4WLA as an .xlsx — from the editor, or from the calendar's read view. */
-export async function openExcelExport() {
-  let src;
-  try {
-    src = await exportSource();
-  } catch (err) {
-    toast({ tone: 'bad', message: err.message, timeout: 10000 });
-    rc.reportError('lookahead:export', err);
-    return;
-  }
+/**
+ * Which weeks, how many, and whether the names come — Export to Excel's
+ * choices as fields, for its own dialog and for the zip beside the delay log
+ * (`ui/rc_la_delay.js`), so the 4WLA in the zip is the one Export to Excel
+ * would save. `days()` and `resources()` read what is chosen.
+ */
+export async function lookaheadChoices(src, { weeks: initialWeeks = src.weeks } = {}) {
   const thisMonday = ed.mondayOf(todayISO());
   const starts = [-7, 0, 7, 14].map((d) => ed.addDaysISO(thisMonday, d));
   const start = selectInput({
     value: thisMonday,
     options: starts.map((d, i) => ({ value: d, label: `${['Last week', 'This week', 'Next week', 'In two weeks'][i]} — from ${fmt(d)}` })),
   });
-  let weeks = src.weeks;
+  let weeks = ed.WINDOW_WEEKS.includes(initialWeeks) ? initialWeeks : 4;
   const size = segmented({
     value: weeks,
     options: ed.WINDOW_WEEKS.map((w) => ({ value: w, label: `${w} weeks` })),
     onChange: (w) => { weeks = w; update(); },
   });
   const summary = el('div', { class: 'rc-hint' });
+  const days = () => ed.windowDays(start.value, weeks);
   const update = async () => {
-    const days = ed.windowDays(start.value, weeks);
-    await src.ensure(days).catch(() => {});
-    const rows = ed.rowsWithWork(src.model, days);
+    const shown = days();
+    await src.ensure(shown).catch(() => {});
+    const rows = ed.rowsWithWork(src.model, shown);
     const n = rows.filter((r) => r.kind === 'activity').length;
-    summary.textContent = `${n} activit${n === 1 ? 'y' : 'ies'} with work between ${fmt(days[0])} and ${fmt(days[days.length - 1])}, `
+    summary.textContent = `${n} activit${n === 1 ? 'y' : 'ies'} with work between ${fmt(shown[0])} and ${fmt(shown[shown.length - 1])}, `
       + (la.exportResources
         ? 'with their sections, names rows and the PTO / Office / Other group rows'
         : 'with their sections — no names rows, and no PTO / Office / Other group rows')
@@ -140,27 +138,49 @@ export async function openExcelExport() {
   resourcesBox.classList.add('lae-export-resources');
   start.addEventListener('change', update);
   await update();
-
-  const canFolder = filestore.hasFolder?.();
-  const build = async () => {
-    const days = ed.windowDays(start.value, weeks);
-    await src.ensure(days);
-    const settings = await rc.listSettings().catch(() => []);
-    const sheetName = settings.find((r) => r.key === 'lookahead_sheet')?.value || '4WLA';
-    const bytes = lookaheadWorkbook({
-      model: src.model, days, legend: src.legend, codes: src.codes.filter((c) => c.active !== false), title: src.title, sheetName,
-      resources: la.exportResources,
-    });
-    return { bytes, name: lookaheadFileName(days, sheetName) };
-  };
-  openModal({
-    title: 'Export to Excel',
-    subtitle: 'The same columns, merged headings and colours as the 4WLA',
-    body: el('div', { class: 'lae-form' }, [
+  return {
+    fields: [
       el('label', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'Starting' }), start]),
       el('div', { class: 'cx-field' }, [el('span', { class: 'cx-label', text: 'Weeks' }), size]),
       resourcesBox,
       summary,
+    ],
+    days,
+    resources: () => la.exportResources,
+  };
+}
+
+/** The 4WLA workbook for those days, in the 4WLA layout, named for its window. */
+export async function lookaheadBook(src, days, { resources = la.exportResources } = {}) {
+  await src.ensure(days);
+  const settings = await rc.listSettings().catch(() => []);
+  const sheetName = settings.find((r) => r.key === 'lookahead_sheet')?.value || '4WLA';
+  const bytes = lookaheadWorkbook({
+    model: src.model, days, legend: src.legend, codes: src.codes.filter((c) => c.active !== false), title: src.title, sheetName,
+    resources,
+  });
+  return { bytes, name: lookaheadFileName(days, sheetName) };
+}
+
+/** The 4WLA as an .xlsx — from the editor, or from the calendar's read view. */
+export async function openExcelExport() {
+  let src;
+  try {
+    src = await exportSource();
+  } catch (err) {
+    toast({ tone: 'bad', message: err.message, timeout: 10000 });
+    rc.reportError('lookahead:export', err);
+    return;
+  }
+  const choices = await lookaheadChoices(src);
+
+  const canFolder = filestore.hasFolder?.();
+  const build = () => lookaheadBook(src, choices.days(), { resources: choices.resources() });
+  openModal({
+    title: 'Export to Excel',
+    subtitle: 'The same columns, merged headings and colours as the 4WLA',
+    body: el('div', { class: 'lae-form' }, [
+      ...choices.fields,
       // The same 4WLA, filed as 4WLA_Latest on a schedule for sending on.
       scheduleSection(),
     ]),

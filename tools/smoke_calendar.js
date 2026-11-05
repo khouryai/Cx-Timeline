@@ -30,6 +30,7 @@ import { lookaheadEditor } from './smoke_la_editor.js';
 import { tawrRequests } from './smoke_tawr.js';
 import { lookaheadP6 } from './smoke_la_p6.js';
 import { masterExport } from './smoke_master_export.js';
+import { delayExport } from './smoke_delay_export.js';
 import { fixtureRows, seedFiles, installFolder, openCalendar, exposeDb, ME } from './lib/rc_folder.js';
 import path from 'node:path';
 import url from 'node:url';
@@ -715,8 +716,9 @@ async function main() {
   await page.waitForTimeout(500);
   check('the log can be narrowed to an end date as well as a start',
     (await cancelRows().count()) === 1 && /to /.test(await page.locator('#rc-frame').innerText()));
-  check('and the export says how many it will carry',
-    /Export 1 to CSV/.test(await page.locator('#rc-frame').innerText()));
+  check('and the export says how many it will carry — to Excel now, beside a PDF of the list',
+    /Export 1 to Excel/.test(await page.locator('#rc-frame').innerText()) && !/to CSV/.test(await page.locator('#rc-frame').innerText())
+      && (await page.locator('#rc-frame .la-cancel-list-pdf').count()) === 1);
   await page.locator('#rc-frame input[aria-label="Log ends on"]').fill('');
   await page.locator('#rc-frame input[aria-label="Log ends on"]').dispatchEvent('change');
   await page.waitForTimeout(500);
@@ -1094,6 +1096,7 @@ async function main() {
   await tawrRequests(page, { check, shot: process.env.CX_TAWR_SHOT || null });
   await lookaheadP6(page, { check, shot: process.env.CX_P6_SHOT || null });
   await masterExport(page, { check });
+  await delayExport(page, { check });
 
   /* ── A tablet ─────────────────────────────────────────────────────────
      The calendar is used standing up, and a tablet in landscape is wider than

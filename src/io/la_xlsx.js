@@ -18,23 +18,21 @@
  * No DOM — `tools/test_la_edit.js` writes one and reads it back through
  * `parseSheet()`, the same reader that reads BART's file.
  *
- * Imports: core/la_edit, io/xlsx_write, io/lookahead.
+ * Imports: core/la_edit, io/xlsx_write, io/lookahead, io/cancel_log.
  */
 
 import {
   FIELDS, LAYOUT, SECTION_BAND, rowsWithWork, getCell, metaValues, colLetters,
   isWeekend, weekdayLetter, monthLabel, cancelledTokens,
 } from '../core/la_edit.js';
-import { zipStore, xmlEscape, styleBook, workbookParts } from './xlsx_write.js';
+import {
+  zipStore, xmlEscape, styleBook, workbookParts, dateSerial, dateTimeSerial, CELL_LIMIT,
+} from './xlsx_write.js';
 import { isDark } from './lookahead.js';
 import { cellTokens } from '../core/lookahead.js';
+import { CANCEL_FILL, CANCEL_INK, statsText } from './cancel_log.js';
 
 const WEEKEND = '7F7F7F';
-/* The cancellation log's colours, as `--la-cancel-*` draws them on screen:
-   a fill per answer for a day cancelled outright (BART's is the legend's red,
-   passed in), and writing a white sheet can carry for a resource struck out. */
-const CANCEL_FILL = { Hitachi: '0070C0', Other: 'FFC000', open: 'E4D7F5' };
-const CANCEL_INK = { BART: 'FF0000', Hitachi: '0070C0', Other: 'C55A11', open: '7030A0' };
 const DAY_WIDTH = 12.7109375;
 const LINE = 12.75;
 
@@ -336,6 +334,16 @@ function safeSheetName(sheetName) {
  */
 export function cancellationWorkbook({ days, rows, title = 'Cancellations', subtitle = '', red = 'FF0000' }) {
   const styles = styleBook();
+  const sheet = cancellationSheet(styles, { days, rows, title, subtitle, red });
+  return zipStore(workbookParts({ sheetName: 'Cancellations', sheetXml: sheet.xml, stylesXml: styles.xml(), printTitles: sheet.printTitles, title }));
+}
+
+/**
+ * The calendar's worksheet, its styles added to `styles` — for a workbook of
+ * its own or as one sheet of several (`delayLogWorkbook()`). `selected` makes
+ * it the tab the workbook opens on; only one sheet of a workbook may be.
+ */
+function cancellationSheet(styles, { days, rows, title, subtitle, red, selected = true }) {
   const all = 'lrtb';
   const S = {
     title: styles.id({ bold: true, size: 14, v: 'center' }),
@@ -437,7 +445,7 @@ export function cancellationWorkbook({ days, rows, title = 'Cancellations', subt
     + 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
     + '<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>'
     + `<dimension ref="A1:${colLetters(lastCol)}${r}"/>`
-    + '<sheetViews><sheetView tabSelected="1" zoomScale="80" zoomScaleNormal="80" workbookViewId="0">'
+    + `<sheetViews><sheetView${selected ? ' tabSelected="1"' : ''} zoomScale="80" zoomScaleNormal="80" workbookViewId="0">`
     + `<pane xSplit="${first - 1}" ySplit="6" topLeftCell="${colLetters(first)}7" activePane="bottomRight" state="frozen"/>`
     + '</sheetView></sheetViews>'
     + `<sheetFormatPr defaultRowHeight="${LINE}"/>`
@@ -448,5 +456,168 @@ export function cancellationWorkbook({ days, rows, title = 'Cancellations', subt
     + '<pageSetup paperSize="17" orientation="landscape" fitToWidth="1" fitToHeight="0"/>'
     + '</worksheet>';
 
-  return zipStore(workbookParts({ sheetName: 'Cancellations', sheetXml, stylesXml: styles.xml(), printTitles: '$4:$6', title }));
+  return { xml: sheetXml, printTitles: '$4:$6' };
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   The cancellation log as a list, and the delay log
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/** The list's columns: what the Cancellations tab shows, with its dates and numbers as Excel's own. */
+const LIST_COLUMNS = [
+  { key: 'label', heading: 'Activity', width: 46, wrap: true },
+  { key: 'location', heading: 'Location', width: 14, wrap: true },
+  { key: 'what', heading: 'What', width: 22 },
+  { key: 'resources', heading: 'BART resources', width: 18, wrap: true },
+  { key: 'start', heading: 'From', width: 11, kind: 'date' },
+  { key: 'end', heading: 'To', width: 11, kind: 'date' },
+  { key: 'days', heading: 'Days', width: 7, kind: 'number' },
+  { key: 'responsible', heading: 'Responsible', width: 15, kind: 'party' },
+  { key: 'reason', heading: 'Reason', width: 50, wrap: true },
+  { key: 'loggedBy', heading: 'Logged by', width: 16 },
+  { key: 'loggedAt', heading: 'Logged on', width: 16, kind: 'instant' },
+  { key: 'reads', heading: 'Readings', width: 10, kind: 'number' },
+  { key: 'firstSeen', heading: 'First seen', width: 11, kind: 'day' },
+];
+const LIST_BORDER = 'D9D9D9';
+
+/**
+ * The list's worksheet: a title, the span, the counts, and under them one
+ * table — a heading row frozen and filtered, a row per cancellation, dates
+ * that sort as dates, and the Responsible cell in whose colour it was, the
+ * same as the calendar's (BART the legend's red, Hitachi blue, another party
+ * amber, no reason yet lavender) with the party in words in it.
+ */
+function cancellationListSheet(styles, {
+  lines: entries, stats, title, subtitle = '', red = 'FF0000', selected = true, empty = 'Nothing was cancelled in these dates.',
+}) {
+  const cell = { border: 'lrtb', borderColor: LIST_BORDER, v: 'top' };
+  const S = {
+    title: styles.id({ bold: true, size: 14, v: 'center' }),
+    sub: styles.id({ color: '595959', v: 'center' }),
+    head: styles.id({ bold: true, fill: 'F2F2F2', border: 'lrtb', borderColor: 'BFBFBF', v: 'center', wrap: true }),
+    text: styles.id({ ...cell, wrap: true }),
+    number: styles.id({ ...cell, h: 'center' }),
+    date: styles.id({ ...cell, h: 'left', numFmt: 15 }),
+    instant: styles.id({ ...cell, h: 'left', numFmt: 22 }),
+    // A BART resource struck out of work that went ahead, as the grid draws it.
+    struck: styles.id({ ...cell, wrap: true, bold: true, strike: true, color: 'C00000' }),
+    removed: styles.id({ ...cell, wrap: true, italic: true, color: '808080' }),
+    empty: styles.id({ italic: true, color: '808080' }),
+  };
+  const party = (p) => {
+    const who = p == null ? 'open' : p in CANCEL_INK ? p : 'Other';
+    const fill = who === 'BART' ? String(red).toUpperCase() : CANCEL_FILL[who];
+    return styles.id({
+      ...cell, h: 'center', bold: true, italic: who === 'open', fill,
+      color: who === 'open' ? CANCEL_INK.open : isDark(fill) ? 'FFFFFF' : '000000',
+    });
+  };
+  const columns = entries.some((l) => l.removed)
+    ? [...LIST_COLUMNS, { key: 'removed', heading: 'Removed from the log', width: 12 }]
+    : LIST_COLUMNS;
+  const ref = (c, r) => `${colLetters(c + 1)}${r}`;
+  const str = (c, r, text, s) => (text === '' || text == null
+    ? `<c r="${ref(c, r)}" s="${s}"/>`
+    : `<c r="${ref(c, r)}" s="${s}" t="inlineStr"><is><t xml:space="preserve">${xmlEscape(String(text).slice(0, CELL_LIMIT))}</t></is></c>`);
+  const val = (c, r, n, s) => (n == null || !Number.isFinite(n)
+    ? `<c r="${ref(c, r)}" s="${s}"/>`
+    : `<c r="${ref(c, r)}" s="${s}"><v>${n}</v></c>`);
+  const rowsXml = [];
+  const addRow = (r, cells, ht = null) => rowsXml.push(`<row r="${r}"${ht ? ` ht="${ht}" customHeight="1"` : ''}>${cells.join('')}</row>`);
+
+  addRow(1, [str(0, 1, title, S.title)], 21);
+  if (subtitle) addRow(2, [str(0, 2, subtitle, S.sub)]);
+  if (stats) addRow(3, [str(0, 3, statsText(stats), S.sub)]);
+  const HEAD = 5;
+  addRow(HEAD, columns.map((c, i) => str(i, HEAD, c.heading, S.head)), 18);
+
+  let r = HEAD + 1;
+  for (const l of entries) {
+    const cells = columns.map((c, i) => {
+      const v = c.key === 'removed' ? (l.removed ? 'Yes' : '') : l[c.key];
+      if (c.kind === 'date') return val(i, r, dateSerial(v), S.date);
+      // The day an instant fell on, on this computer's calendar.
+      if (c.kind === 'day') return val(i, r, v ? Math.floor(dateTimeSerial(v) ?? NaN) : null, S.date);
+      if (c.kind === 'instant') return val(i, r, v ? +(dateTimeSerial(v) ?? NaN).toFixed(6) : null, S.instant);
+      if (c.kind === 'number') return val(i, r, Number(v) || 0, S.number);
+      if (c.kind === 'party') return str(i, r, v, party(l.party));
+      if (c.key === 'resources' && l.kind === 'support' && v) return str(i, r, v, S.struck);
+      if (c.key === 'what' && l.removed) return str(i, r, v, S.removed);
+      return str(i, r, v, S.text);
+    });
+    const height = Math.max(1, ...columns.filter((c) => c.wrap).map((c) => lines(String(l[c.key] ?? ''), c.width)));
+    addRow(r, cells, height > 1 ? +(height * LINE + 1.5).toFixed(2) : null);
+    r++;
+  }
+  if (!entries.length) {
+    addRow(r, [str(0, r, empty, S.empty)]);
+    r++;
+  }
+  const last = colLetters(columns.length);
+  const lastRow = Math.max(HEAD + 1, r - 1);
+  const xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    + '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+    + 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+    + '<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>'
+    + `<dimension ref="A1:${last}${lastRow}"/>`
+    + `<sheetViews><sheetView${selected ? ' tabSelected="1"' : ''} workbookViewId="0">`
+    + `<pane ySplit="${HEAD}" topLeftCell="A${HEAD + 1}" activePane="bottomLeft" state="frozen"/>`
+    + `<selection pane="bottomLeft" activeCell="A${HEAD + 1}" sqref="A${HEAD + 1}"/></sheetView></sheetViews>`
+    + `<sheetFormatPr defaultRowHeight="${LINE}"/>`
+    + `<cols>${columns.map((c, i) => `<col min="${i + 1}" max="${i + 1}" width="${c.width}" customWidth="1"/>`).join('')}</cols>`
+    + `<sheetData>${rowsXml.join('')}</sheetData>`
+    + `<autoFilter ref="A${HEAD}:${last}${lastRow}"/>`
+    + '<pageMargins left="0.4" right="0.4" top="0.6" bottom="0.6" header="0.3" footer="0.3"/>'
+    + '<pageSetup orientation="landscape" fitToWidth="1" fitToHeight="0"/>'
+    + '</worksheet>';
+  return { xml, printTitles: `$${HEAD}:$${HEAD}`, filter: `$A$${HEAD}:$${last}$${lastRow}` };
+}
+
+/**
+ * The cancellation log as a list, in Excel — what the Cancellations tab's
+ * Export to Excel saves: exactly the rows on screen.
+ *
+ * `lines` is `logLines()` (`io/cancel_log.js`), `stats` `logStats()` over what
+ * the tab counts.
+ *
+ * @param {object} o
+ * @param {object[]} o.lines
+ * @param {object} [o.stats]
+ * @param {string} [o.title]
+ * @param {string} [o.subtitle]
+ * @param {string} [o.red]
+ * @param {string} [o.empty]
+ */
+export function cancellationListWorkbook({ lines: entries, stats, title = 'Cancellation log', subtitle = '', red = 'FF0000', empty }) {
+  const styles = styleBook();
+  const sheet = cancellationListSheet(styles, { lines: entries, stats, title, subtitle, red, empty });
+  return zipStore(workbookParts({
+    sheetName: 'Cancellations', sheetXml: '', stylesXml: styles.xml(), title,
+    sheets: [{ name: 'Cancellations', ...sheet }],
+  }));
+}
+
+/**
+ * The delay log in Excel: the list on the first sheet and the same events as a
+ * calendar of its days on the second, one style table between them.
+ *
+ * @param {object} o
+ * @param {object[]} o.lines    `logLines()`
+ * @param {object} [o.stats]    `logStats()`
+ * @param {string[]} o.days     the days the calendar covers
+ * @param {object[]} o.rows     `calendarCells()`
+ * @param {string} [o.title]
+ * @param {string} [o.subtitle]
+ * @param {string} [o.red]
+ * @param {string} [o.empty]
+ */
+export function delayLogWorkbook({ lines: entries, stats, days, rows, title = 'Delay log', subtitle = '', red = 'FF0000', empty }) {
+  const styles = styleBook();
+  const list = cancellationListSheet(styles, { lines: entries, stats, title, subtitle, red, empty, selected: true });
+  const calendar = cancellationSheet(styles, { days, rows, title: `${title} — as a calendar`, subtitle, red, selected: false });
+  return zipStore(workbookParts({
+    sheetName: 'Delay log', sheetXml: '', stylesXml: styles.xml(), title,
+    sheets: [{ name: 'Delay log', ...list }, { name: 'Calendar', ...calendar }],
+  }));
 }

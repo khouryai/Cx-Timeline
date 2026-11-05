@@ -196,6 +196,59 @@ console.log('\nThe master export, opened by LibreOffice Calc');
   check('an empty sheet says why', csv.some((f) => f.includes('Leave')) && /No leave in these dates/.test(read('Leave')));
 }
 
+/* The delay log: the cancellation list and its calendar, two sheets sharing
+   one style table. Calc writes each out as CSV, and saves the workbook again,
+   which says the dates are dates and whose it was keeps its colour. */
+console.log('\nThe delay log, opened by LibreOffice Calc');
+{
+  const cl = await import(path.join(ROOT, 'src/io/cancel_log.js'));
+  const events = [
+    { key: 'ixl', kind: 'activity', codes: '', label: 'IXL Regression Testing', location: 'W34', start: day(0), end: day(1), days: 2, reads: 2,
+      firstSeen: `${day(-3)}T09:00:00Z`, resources: new Map([['X', 2]]), note: { party: 'BART', reason: 'Possession withdrawn & "late" <notice>' }, history: [] },
+    { key: 'cable', kind: 'support', codes: 'WIT', label: 'Cable pull', location: 'W40', start: day(2), end: day(2), days: 1, reads: 1,
+      firstSeen: null, resources: new Map([['WIT', 1]]), note: null, history: [] },
+  ];
+  const book = xl.delayLogWorkbook({
+    lines: cl.logLines(events), stats: cl.logStats(events), days: cl.spanDays(day(-6), day(3)),
+    rows: cl.calendarCells(events), title: 'Delay log', subtitle: 'the last ten days', red: 'FF0000',
+  });
+  const file = path.join(dir, 'delay.xlsx');
+  fs.writeFileSync(file, book);
+  const csvDir = path.join(dir, 'delay-csv');
+  const againDir = path.join(dir, 'delay-again');
+  fs.mkdirSync(csvDir);
+  fs.mkdirSync(againDir);
+  try {
+    execFileSync(bin, ['--headless', '--norestore', '--convert-to',
+      'csv:Text - txt - csv (StarCalc):44,34,76,1,,0,false,true,false,false,false,-1', '--outdir', csvDir, file], {
+      env: { ...process.env, HOME: home }, stdio: 'pipe', timeout: 180000,
+    });
+    execFileSync(bin, ['--headless', '--norestore', '--convert-to', 'xlsx:Calc MS Excel 2007 XML', '--outdir', againDir, file], {
+      env: { ...process.env, HOME: home }, stdio: 'pipe', timeout: 180000,
+    });
+  } catch (err) {
+    check('LibreOffice opens the delay log', false, String(err.stderr || err.message).slice(0, 200));
+  }
+  const csv = fs.readdirSync(csvDir);
+  check('LibreOffice opens the delay log, the list and the calendar', ['Delay log', 'Calendar']
+    .every((name) => csv.some((f) => f.includes(name))), csv.join(', '));
+  const read = (name) => (csv.some((f) => f.includes(name)) ? fs.readFileSync(path.join(csvDir, csv.find((f) => f.includes(name))), 'utf8') : '');
+  const list = read('Delay log');
+  check('the list\'s dates arrive as dates, its reason whole, escaping and all',
+    new RegExp(day(0).slice(0, 4).slice(2)).test(list) && !/,46\d{3},/.test(list) && list.includes('Possession withdrawn & ""late"" <notice>'),
+    list.split('\n').slice(4, 7).join(' / '));
+  check('and the calendar carries each run with whose it was', /Possession withdrawn/.test(read('Calendar')) && /1 WIT cancelled/.test(read('Calendar')));
+  const again = path.join(againDir, 'delay.xlsx');
+  if (fs.existsSync(again)) {
+    const bytes = fs.readFileSync(again);
+    const back = la.parseSheet(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength), 'Delay log');
+    const cell = back.rows.flatMap((r) => r.cells).find((c) => c.value === 'BART');
+    check('saved again, whose it was keeps its colour', cell?.hex === 'FF0000', JSON.stringify(cell));
+  } else {
+    check('saved again, whose it was keeps its colour', false, 'not re-saved');
+  }
+}
+
 fs.rmSync(dir, { recursive: true, force: true });
 console.log(`\n${passed}/${passed + failures.length} checks passed`);
 if (failures.length) {

@@ -46,6 +46,8 @@ export function textWidth(text, size, fontKey = 'F1') {
       units += 600;
     } else if (code >= 32 && code <= 126) {
       units += font.widths[code - 32];
+    } else if (code === 0xb7) {
+      units += 278; // the middle dot WinAnsi carries as itself — "2 X · 1 WIT"
     } else {
       units += 556; // reasonable stand-in for anything outside the table
     }
@@ -214,7 +216,6 @@ function escapeText(text) {
     .replace(/[“”]/g, '"')
     .replace(/[–—]/g, '-')
     .replace(/→/g, '->')
-    .replace(/·/g, '-')
     .replace(/…/g, '...')
     .replace(/[^\x20-\x7e\xa0-\xff]/g, '?')
     .replace(/\\/g, '\\\\')
@@ -375,14 +376,23 @@ export function pageBox({ pageSize = 'a3', orientation = 'landscape' } = {}) {
  * `maxScale` stops a three-row sheet being blown up to fill A2.
  */
 export function fitScale(scene, opts = {}) {
+  const box = contentBox(opts);
+  if (!(scene.width > 0) || !(scene.height > 0)) return 1;
+  return Math.min(box.w / scene.width, box.h / scene.height, opts.maxScale ?? 1.9);
+}
+
+/**
+ * The room a fitted page leaves for its drawing, in points: the sheet less its
+ * margins, the title and the footer. Exported so a layout that paginates — a
+ * list running over several sheets — can fill each page at full size, with the
+ * same arithmetic `fitToPdf()` then places it with.
+ */
+export function contentBox(opts = {}) {
   const size = pageBox(opts);
   const margin = opts.margin ?? 26;
   const headerH = opts.title || opts.subtitle ? 34 : 12;
   const footerH = 18;
-  const contentW = size.w - margin * 2;
-  const contentH = size.h - margin * 2 - headerH - footerH;
-  if (!(scene.width > 0) || !(scene.height > 0)) return 1;
-  return Math.min(contentW / scene.width, contentH / scene.height, opts.maxScale ?? 1.9);
+  return { w: size.w - margin * 2, h: size.h - margin * 2 - headerH - footerH };
 }
 
 /**
@@ -401,10 +411,32 @@ export function fitScale(scene, opts = {}) {
  * however far the drawing had to shrink.
  */
 export function fitToPdf(scene, opts = {}) {
+  return assemble([fittedPage(scene, opts)], opts);
+}
+
+/**
+ * Several scenes, each fitted whole on a page of its own, as one PDF — a list
+ * that runs over three sheets and the calendar after it. `sheets` is `[{
+ * scene, title?, subtitle?, maxScale? }]`; anything a sheet does not say comes
+ * from `opts`, which also names the document. Every page says which it is
+ * ("Page 2 of 4") beside its paper and scale, because a stack of prints that
+ * comes apart has to go back together in order.
+ */
+export function fitPagesToPdf(sheets, opts = {}) {
+  const pages = sheets.map((sheet, i) => fittedPage(sheet.scene, {
+    ...opts,
+    ...Object.fromEntries(Object.entries(sheet).filter(([key, value]) => key !== 'scene' && value !== undefined)),
+    pageLabel: sheets.length > 1 ? `Page ${i + 1} of ${sheets.length}` : '',
+  }));
+  return assemble(pages, opts);
+}
+
+/** One scene on one page, scaled to fit both ways, under its title and over its footer. */
+function fittedPage(scene, opts) {
   const size = pageBox(opts);
   const margin = opts.margin ?? 26;
   const headerH = opts.title || opts.subtitle ? 34 : 12;
-  const contentW = size.w - margin * 2;
+  const contentW = contentBox(opts).w;
   const scale = fitScale(scene, opts);
 
   const page = new Page(size.w, size.h);
@@ -427,7 +459,7 @@ export function fitToPdf(scene, opts = {}) {
 
   /* What it was shrunk to, on the page itself. Somebody holding a print that is
      hard to read should be able to see why without opening the application. */
-  const note = `${size.label}  ·  ${Math.round(scale * 100)}%`;
+  const note = [size.label, `${Math.round(scale * 100)}%`, opts.pageLabel].filter(Boolean).join('  ·  ');
   c.setFill(palette.textSubtle || '#888888').text(
     size.w - margin - textWidth(note, 7.5, 'F3'),
     page.flip(margin + 12),
@@ -443,8 +475,7 @@ export function fitToPdf(scene, opts = {}) {
   const ty = margin + headerH;
 
   drawItems(c, page, scene.items, { scale, tx, ty, sceneOffsetX: 0, sceneOffsetY: 0 });
-
-  return assemble([page], opts);
+  return page;
 }
 
 /**

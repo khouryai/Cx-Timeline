@@ -33,6 +33,7 @@ import { la, WEEK_CHOICES } from './rc_la_state.js';
 import { checkNowButton, lookaheadSource, EDITOR_SOURCE, writtenView } from './rc_ingest.js';
 import { renderEditor, flushEditor } from './rc_la_editor.js';
 import { openExcelExport } from './rc_la_export.js';
+import { delayExportButton } from './rc_la_delay.js';
 import { renderLegend } from './rc_la_legend.js';
 import { renderChanges, renderSnapshots } from './rc_la_changes.js';
 import { renderCancellations } from './rc_la_cancellations.js';
@@ -453,6 +454,9 @@ async function renderCalendar(host) {
       title: 'The look-ahead as an .xlsx in the 4WLA layout — the same export as in Edit.',
       onClick: () => openExcelExport(),
     }) : null,
+    /* The same 4WLA with the delay log of the days just gone, as one .zip —
+       an administrator's, like the cancellation log it is read from. */
+    written && rc.isAdmin() ? delayExportButton() : null,
   ].filter(Boolean)));
   host.appendChild(body);
   await draw();

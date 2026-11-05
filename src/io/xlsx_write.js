@@ -160,8 +160,9 @@ export function xmlEscape(s) {
 /**
  * The style table, built from what the sheet asks for.
  *
- * A style is described as `{ bold, italic, size, color, fill, border, h, v,
- * wrap, shrink, numFmt }` and `id()` returns its index in `cellXfs`, adding it the first time
+ * A style is described as `{ bold, italic, strike, size, color, fill, border,
+ * borderColor, h, v, wrap, shrink, numFmt }` and `id()` returns its index in
+ * `cellXfs`, adding it the first time
  * — so the workbook carries exactly the styles its cells use and no more.
  */
 export function styleBook({ font = 'Arial', size = 10 } = {}) {
@@ -172,7 +173,7 @@ export function styleBook({ font = 'Arial', size = 10 } = {}) {
   const index = new Map();
 
   const fontId = (s) => {
-    const xml = `<font>${s.bold ? '<b/>' : ''}${s.italic ? '<i/>' : ''}<sz val="${s.size || size}"/>`
+    const xml = `<font>${s.bold ? '<b/>' : ''}${s.italic ? '<i/>' : ''}${s.strike ? '<strike/>' : ''}<sz val="${s.size || size}"/>`
       + `<color rgb="FF${s.color || '000000'}"/><name val="${font}"/><family val="2"/></font>`;
     let at = fonts.indexOf(xml);
     if (at < 0) { fonts.push(xml); at = fonts.length - 1; }
@@ -185,9 +186,10 @@ export function styleBook({ font = 'Arial', size = 10 } = {}) {
     if (at < 0) { fills.push(xml); at = fills.length - 1; }
     return at;
   };
-  const borderId = (b = '') => {
+  const borderId = (b = '', color = null) => {
+    const ink = color ? `<color rgb="FF${color}"/>` : '<color indexed="64"/>';
     const side = (name) => (b.includes(name[0])
-      ? `<${name} style="thin"><color indexed="64"/></${name}>` : `<${name}/>`);
+      ? `<${name} style="thin">${ink}</${name}>` : `<${name}/>`);
     const xml = `<border>${side('left')}${side('right')}${side('top')}${side('bottom')}<diagonal/></border>`;
     let at = borders.indexOf(xml);
     if (at < 0) { borders.push(xml); at = borders.length - 1; }
@@ -208,7 +210,7 @@ export function styleBook({ font = 'Arial', size = 10 } = {}) {
       : '';
     const f = fontId(s);
     const fi = fillId(s.fill);
-    const b = borderId(s.border);
+    const b = borderId(s.border, s.borderColor);
     // A built-in number format by its id (14 a date, 22 a date and time) —
     // built-ins need no <numFmts> entry, and every program reads them.
     const nf = s.numFmt || 0;
@@ -255,11 +257,23 @@ export function sheetNameFor(name) {
   return clean || 'Sheet1';
 }
 
-export function workbookParts({ sheetName, sheetXml, stylesXml, printTitles = null, title = '' }) {
-  const name = xmlEscape(sheetNameFor(sheetName));
-  const defined = printTitles
-    ? `<definedNames><definedName name="_xlnm.Print_Titles" localSheetId="0">'${name.replace(/'/g, "''")}'!${printTitles}</definedName></definedNames>`
-    : '';
+export function workbookParts({ sheetName, sheetXml, stylesXml, printTitles = null, title = '', sheets = null }) {
+  /* One sheet, or several sharing one style table — `sheets` is `[{ name, xml,
+     printTitles?, filter? }]`, `filter` the range a sheet's auto-filter covers.
+     Only the first may be the selected tab: two selected tabs is Excel's
+     "grouped sheets", where typing into one writes into both. */
+  const used = new Set();
+  const named = (sheets || [{ name: sheetName, xml: sheetXml, printTitles }]).map((sheet) => {
+    let name = sheetNameFor(sheet.name);
+    for (let n = 2; used.has(name.toLowerCase()); n++) name = sheetNameFor(`${sheetNameFor(sheet.name).slice(0, 27)} (${n})`);
+    used.add(name.toLowerCase());
+    return { ...sheet, name };
+  });
+  const quoted = (name) => `'${xmlEscape(name).replace(/'/g, "''")}'`;
+  const defined = named.flatMap((sheet, i) => [
+    sheet.filter ? `<definedName name="_xlnm._FilterDatabase" localSheetId="${i}" hidden="1">${quoted(sheet.name)}!${sheet.filter}</definedName>` : '',
+    sheet.printTitles ? `<definedName name="_xlnm.Print_Titles" localSheetId="${i}">${quoted(sheet.name)}!${sheet.printTitles}</definedName>` : '',
+  ]).join('');
   return [
     {
       name: '[Content_Types].xml',
@@ -268,7 +282,7 @@ export function workbookParts({ sheetName, sheetXml, stylesXml, printTitles = nu
         + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
         + '<Default Extension="xml" ContentType="application/xml"/>'
         + '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
-        + '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        + named.map((_, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('')
         + '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
         + '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>'
         + '</Types>',
@@ -296,19 +310,20 @@ export function workbookParts({ sheetName, sheetXml, stylesXml, printTitles = nu
         + '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
         + 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
         + '<bookViews><workbookView xWindow="0" yWindow="0" windowWidth="28800" windowHeight="15000"/></bookViews>'
-        + `<sheets><sheet name="${name}" sheetId="1" r:id="rId1"/></sheets>${defined}`
+        + `<sheets>${named.map((sheet, i) => `<sheet name="${xmlEscape(sheet.name)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join('')}</sheets>`
+        + (defined ? `<definedNames>${defined}</definedNames>` : '')
         + '</workbook>',
     },
     {
       name: 'xl/_rels/workbook.xml.rels',
       data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-        + '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
-        + '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+        + named.map((_, i) => `<Relationship Id="rId${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`).join('')
+        + `<Relationship Id="rId${named.length + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>`
         + '</Relationships>',
     },
     { name: 'xl/styles.xml', data: stylesXml },
-    { name: 'xl/worksheets/sheet1.xml', data: sheetXml },
+    ...named.map((sheet, i) => ({ name: `xl/worksheets/sheet${i + 1}.xml`, data: sheet.xml })),
   ];
 }
 

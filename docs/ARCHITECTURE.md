@@ -882,8 +882,9 @@ an event id — the event has none, and a week cancelled on Monday grows to a
 fortnight by Wednesday — so `attachCancellationNotes()` gives it to the event
 on the same activity whose days it overlaps, newest uncorrected note first.
 The log takes a start **and an end** date (a blank end is no end; an event is
-in the span when it starts inside it and is kept whole), and "Export N to CSV"
-carries exactly what is on screen with the span in the file name. Because the
+in the span when it starts inside it and is kept whole), and "Export N to
+Excel" and "Export PDF" carry exactly what is on screen with the span in the
+file name — see *The cancellation log exports as it is drawn*. Because the
 view reads cells written under the rules of the day, "Re-read saved
 snapshots" re-derives `cells` for every read since six weeks before the start
 (`rederiveCancellations()`), matched on `row_key` within each snapshot — which
@@ -1401,6 +1402,63 @@ replace anything — browsers number a second copy — and the dialog says so �
 layout beside it once the look-ahead is written here; with no folder
 connected it is downloaded. The settings are this computer's
 (`localStorage`), because the folder and the clock are.
+
+### The cancellation log exports as it is drawn
+
+**The cancellation log exports as it is drawn.** The list on Look-ahead →
+Cancellations used to leave as a CSV — every field quoted, the dates as text,
+the party a word with no colour, and nothing to say which span it was or how it
+had been narrowed. It now leaves two ways, both carrying exactly the rows on
+screen. **Export N to Excel** (`cancellationListWorkbook()` in `io/la_xlsx.js`)
+is one clean table: the title, the span and the counts above it; a heading row
+shaded, frozen and filtered, printed on every page; From and To as dates Excel
+sorts; Days and Readings as numbers; the Responsible cell filled in whose colour
+it was, with the party in words (BART the legend's red, Hitachi blue, another
+party amber, no reason yet lavender — `CANCEL_FILL` / `CANCEL_INK`, the
+calendar's); a resource struck out of work that went ahead struck through in
+red, as the grid draws it; and who logged the reason and when, from the roster.
+**Export PDF** (`cancellationListPdf()` in `io/cancel_log.js`) draws the table
+the tab draws — the chips, the squares a day, the column heads in mono
+capitals, the badges for what and whose, the struck-out codes, "Corrected n
+time(s)", a removed one dimmed — on paper colours, as many A4 landscape pages as
+it needs at full size (`fitPagesToPdf()`), the heads repeated and no row split
+across a page. A list narrowed by kind, by "no reason yet" or widened to the
+removed ones says so in its subtitle and its note: the counts are over the
+span, and a narrowed list that does not say it is narrowed reads as everything.
+
+The reading is shared, not copied: `logLines()` (an event in words and dates),
+`logStats()` and `statChips()` (the counts), `runText()` and `calendarRows()`
+(the calendar's cells) live in `io/cancel_log.js`, which the tab, its calendar's
+Excel and the delay log all import, and "Seen" is the day an instant fell on
+this computer's calendar (`seenText()`), not Greenwich's.
+
+### The 4WLA goes out with the delay log, in one .zip
+
+**The 4WLA goes out with the delay log, in one .zip.** "4WLA + delay log",
+beside Export to Excel in the read view (an administrator's, once the look-ahead
+is written here) and in Edit, builds one file (`ui/rc_la_delay.js`): the 4WLA
+workbook exactly as Export to Excel saves it — the same choices
+(`lookaheadChoices()`) and the same builder (`lookaheadBook()`) — and the
+**delay log**, which is the cancellation log over the days just gone, twice: a
+PDF (the list as the tab draws it, then the same events as a calendar of those
+days, `delayLogPdf()`) and a workbook (the list on the first sheet, the calendar
+on the second, one style table and only the first tab selected —
+`delayLogWorkbook()`). The span is the last ten days up to and including today
+(`delaySpan()`), changeable in the dialog, which counts what the days hold and
+names every file before anything is built. What is in it is the log's own rule
+(`delayEvents()`): an event that starts inside the span, kept whole, none removed
+from the log — so the zip and the tab set to the same dates agree, and a
+cancellation running on past the last day is listed whole while the calendar
+draws its days up to it. Download, or *Save to the shared folder* into
+`exports/`; the files inside are named for their dates, and the zip for the day
+it was made.
+
+The calendar pages are scaled to the page's width once and paginated by rows,
+the key under each, so a long fortnight runs onto more pages rather than
+shrinking out of reach; a run with no reason yet has a dashed purple edge (four
+dashed lines — the writer dashes lines, not rectangles). The PDF writer now
+lets a middle dot through as itself (WinAnsi carries it), so "2 X · 1 WIT" no
+longer prints as a subtraction.
 
 ### The calendar is used standing up, so it stops assuming a wide screen
 
@@ -2394,6 +2452,20 @@ reasons. Then the schedule: saved, it does not fire at once; a day later it
 exports by itself, once. The writer's typed cells and the schedule's rule are
 in `test_la_edit.js`, and `test_xlsx_compat.js` has LibreOffice Calc open the
 workbook and write every sheet back out.
+
+`smoke_delay_export.js` presses *4WLA + delay log*: the dialog's weeks and the
+last ten days to today, the count and the three file names; the download read
+back — the 4WLA as Export to Excel's, the delay log workbook's list and calendar
+holding every cancellation in those days with its reason, the PDF a list then a
+calendar; three days naming the files for them, and *Save to the shared folder*
+filing the .zip into `exports/`. Then the Cancellations tab: *Export N to Excel*
+a clean table with a row for each one on screen in order, whose it was in its
+colour, and *Export PDF* the counts, the columns and every row — narrowed, and
+saying so. `CX_DELAY_SHOT=<dir>` keeps a picture of the tab and the files, to
+compare by eye. The geometry of the pages is checked in `test_lookahead.js`
+(nothing off the sheet, no row split, a long reason growing its row, the
+calendar's runs one cell across their days), the workbooks in `test_la_edit.js`,
+and `test_xlsx_compat.js` has Calc open the delay log and save it again.
 
 `run_tests.js` runs the suites side by side, in lanes: suites that write the
 same directory (`test_kit` and `smoke_desktop` both assemble `dist-desktop/`)
